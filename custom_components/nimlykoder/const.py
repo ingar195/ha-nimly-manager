@@ -25,12 +25,17 @@ CONF_ZHA_ENDPOINT_ID = "zha_endpoint_id"
 CONF_DOOR_SENSOR = "door_sensor"
 
 # Defaults
+<<<<<<< HEAD
 # Slot 0 is never usable for a PIN code — ZCL DoorLock attribute reports use
 # user_id/slot 0 to mean "no specific user" (manual/zigbee-initiated actions),
 # so a real code living in slot 0 would make activity-log attribution ambiguous.
 DEFAULT_SLOT_MIN = 1
 DEFAULT_SLOT_MAX = 99
 DEFAULT_GUEST_SLOT_MIN = 80
+=======
+DEFAULT_SLOT_MIN = 1                    
+DEFAULT_SLOT_MAX = 999                  
+>>>>>>> 7860a42 (Updated slot min to 1 to protect master code. Increased max to 999.)
 DEFAULT_RESERVED_SLOTS = [1, 2, 3]
 DEFAULT_AUTO_EXPIRE = True
 DEFAULT_CLEANUP_TIME = "03:00:00"
