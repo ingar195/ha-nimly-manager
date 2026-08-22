@@ -723,7 +723,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Set up ZHA activity log listener (ZHA locks only).
     # ZHA device proxies may not be populated yet even after after_dependencies
-    # resolves, so we try immediately and fall back to a background retry loop.
+    # resolves — on some boots ZHA's own gateway object isn't ready for minutes
+    # (slow coordinator reconnects, large networks, etc). We try immediately and
+    # fall back to a background retry loop that keeps going indefinitely rather
+    # than giving up after a few attempts — a permanent give-up here means every
+    # unlock/lock for the rest of the HA session silently never reaches the
+    # activity log, even though ZHA's own entities keep working fine.
     if lock_platform == "zha" and zha_ieee:
         try:
             unsub_act = _register_activity_listener(hass, zha_ieee, zha_endpoint_id)
@@ -732,23 +737,39 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             unsub_act = None
         hass.data[DOMAIN]["unsub_activity_listener"] = unsub_act
         if unsub_act is None:
+            # Quick retries at first, then settle into retrying every 60s forever
+            # until it either succeeds or the integration is unloaded.
+            _RETRY_DELAYS = (5, 10, 20, 30, 60)
+
             async def _retry_activity_listener():
-                for delay in (5, 10, 20, 30, 60):
+                attempt = 0
+                while True:
+                    delay = _RETRY_DELAYS[min(attempt, len(_RETRY_DELAYS) - 1)]
                     await asyncio.sleep(delay)
                     data = hass.data.get(DOMAIN)
                     if not data:
                         return  # integration unloaded
                     if data.get("unsub_activity_listener"):
-                        return  # already registered
+                        return  # already registered (e.g. by another path)
                     unsub = _register_activity_listener(hass, zha_ieee, zha_endpoint_id)
                     if unsub is not None:
                         data["unsub_activity_listener"] = unsub
-                        _LOGGER.info("Activity listener registered after deferred retry")
+                        _LOGGER.info(
+                            "Activity listener registered after deferred retry "
+                            "(attempt %d, %ds since previous)",
+                            attempt + 1, delay,
+                        )
                         return
-                _LOGGER.warning(
-                    "Could not register activity listener after all retries — "
-                    "ZHA cluster not found for ieee=%s ep=%s", zha_ieee, zha_endpoint_id
-                )
+                    attempt += 1
+                    if attempt == len(_RETRY_DELAYS):
+                        _LOGGER.warning(
+                            "Still could not register activity listener after %d "
+                            "attempts (ieee=%s ep=%s) — ZHA may still be starting up. "
+                            "Will keep retrying every %ds until it succeeds or the "
+                            "integration is unloaded.",
+                            attempt, zha_ieee, zha_endpoint_id, _RETRY_DELAYS[-1],
+                        )
+
             hass.async_create_task(_retry_activity_listener())
 
     # Set up scheduler for expired code cleanup
