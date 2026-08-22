@@ -7,6 +7,7 @@
         "data": {
           "name": "Vänligt Namn",
           "lock_entity": "Nimly-lås",
+          "zha_endpoint_id": "ZHA Endpoint-ID (endast för ZHA-hanterade lås)",
           "slot_min": "Minsta Platsnummer",
           "slot_max": "Högsta Platsnummer",
           "reserved_slots": "Reserverade Platser (kommaseparerade)",
@@ -15,9 +16,10 @@
           "overwrite_protection": "Aktivera Överskrivningsskydd"
         },
         "data_description": {
-          "lock_entity": "Välj din Nimly-låsentitet. Detta bör vara låsenheten från din Zigbee2MQTT-integration.",
-          "slot_min": "Första platsnummer tillgängligt för PIN-koder (0-99)",
-          "slot_max": "Sista platsnummer tillgängligt för PIN-koder (0-99)",
+          "lock_entity": "Välj din Nimly-låsentitet. Fungerar för både Zigbee2MQTT (MQTT)- och ZHA-hanterade lås - upptäcks automatiskt.",
+          "zha_endpoint_id": "Endast relevant om låset hanteras av ZHA. Zigbee-endpointen som exponerar Door Lock-klustret - 11 för Nimly-lås. Kontrollera Inställningar > Enheter & tjänster > ZHA > ditt lås > Hantera zigbee-enhet > Kluster om du är osäker.",
+          "slot_min": "Första platsnummer tillgängligt för PIN-koder (1-99, 0 är reserverad)",
+          "slot_max": "Sista platsnummer tillgängligt för PIN-koder (1-99)",
           "reserved_slots": "Platser reserverade för permanenta koder (t.ex. familjemedlemmar). Ange platsnummer separerade med komma.",
           "auto_expire": "Ta automatiskt bort utgångna gästkoder vid den schemalagda tiden",
           "cleanup_time": "Tid på dagen då utgångna koder kommer att tas bort",
@@ -39,6 +41,7 @@
         "description": "Uppdatera dina Nimly-lås kodhanterare inställningar",
         "data": {
           "lock_entity": "Nimly-lås",
+          "zha_endpoint_id": "ZHA Endpoint-ID (endast för ZHA-hanterade lås)",
           "slot_min": "Minsta Platsnummer",
           "slot_max": "Högsta Platsnummer",
           "reserved_slots": "Reserverade Platser (kommaseparerade)",
@@ -47,9 +50,10 @@
           "overwrite_protection": "Aktivera Överskrivningsskydd"
         },
         "data_description": {
-          "lock_entity": "Välj din Nimly-låsentitet. Detta bör vara låsenheten från din Zigbee2MQTT-integration.",
-          "slot_min": "Första platsnummer tillgängligt för PIN-koder (0-99)",
-          "slot_max": "Sista platsnummer tillgängligt för PIN-koder (0-99)",
+          "lock_entity": "Välj din Nimly-låsentitet. Fungerar för både Zigbee2MQTT (MQTT)- och ZHA-hanterade lås - upptäcks automatiskt.",
+          "zha_endpoint_id": "Endast relevant om låset hanteras av ZHA. Zigbee-endpointen som exponerar Door Lock-klustret - 11 för Nimly-lås. Kontrollera Inställningar > Enheter & tjänster > ZHA > ditt lås > Hantera zigbee-enhet > Kluster om du är osäker.",
+          "slot_min": "Första platsnummer tillgängligt för PIN-koder (1-99, 0 är reserverad)",
+          "slot_max": "Sista platsnummer tillgängligt för PIN-koder (1-99)",
           "reserved_slots": "Platser reserverade för permanenta koder (t.ex. familjemedlemmar). Ange platsnummer separerade med komma.",
           "auto_expire": "Ta automatiskt bort utgångna gästkoder vid den schemalagda tiden",
           "cleanup_time": "Tid på dagen då utgångna koder kommer att tas bort",

@@ -7,6 +7,8 @@
         "data": {
           "name": "Friendly Name",
           "lock_entity": "Nimly Lock",
+          "door_sensor": "Door Sensor (optional)",
+          "zha_endpoint_id": "ZHA Endpoint ID (only used for ZHA-managed locks)",
           "slot_min": "Minimum Slot Number",
           "slot_max": "Maximum Slot Number",
           "reserved_slots": "Reserved Slots (comma separated)",
@@ -15,10 +17,12 @@
           "overwrite_protection": "Enable Overwrite Protection"
         },
         "data_description": {
-          "lock_entity": "Select your Nimly lock entity. This should be the lock device from your Zigbee2MQTT integration.",
-          "slot_min": "First slot number available for PIN codes (0-99)",
-          "slot_max": "Last slot number available for PIN codes (0-99)",
-          "reserved_slots": "Slots reserved for permanent codes (e.g., family members). Enter slot numbers separated by commas.",
+          "lock_entity": "Select your Nimly lock entity. Works for both Zigbee2MQTT (MQTT) and ZHA managed locks — detected automatically.",
+          "door_sensor": "Optional binary sensor for the door contact. When set, open/closed state is shown in the panel header and door events are logged in the activity log.",
+          "zha_endpoint_id": "Only relevant if the lock is managed by ZHA. The Zigbee endpoint that exposes the Door Lock cluster — 11 for Nimly locks.",
+          "slot_min": "First slot number available for PIN codes (1–99, 0 is reserved)",
+          "slot_max": "Last slot number available for PIN codes (1–99)",
+          "reserved_slots": "Slots reserved for permanent codes (e.g. family members). Enter slot numbers separated by commas.",
           "auto_expire": "Automatically remove expired guest codes at the scheduled time",
           "cleanup_time": "Time of day when expired codes will be removed",
           "overwrite_protection": "Prevent accidental overwriting of existing codes"
@@ -39,6 +43,8 @@
         "description": "Update your Nimly lock code manager settings",
         "data": {
           "lock_entity": "Nimly Lock",
+          "door_sensor": "Door Sensor (optional)",
+          "zha_endpoint_id": "ZHA Endpoint ID (only used for ZHA-managed locks)",
           "slot_min": "Minimum Slot Number",
           "slot_max": "Maximum Slot Number",
           "reserved_slots": "Reserved Slots (comma separated)",
@@ -47,10 +53,12 @@
           "overwrite_protection": "Enable Overwrite Protection"
         },
         "data_description": {
-          "lock_entity": "Select your Nimly lock entity. This should be the lock device from your Zigbee2MQTT integration.",
-          "slot_min": "First slot number available for PIN codes (0-99)",
-          "slot_max": "Last slot number available for PIN codes (0-99)",
-          "reserved_slots": "Slots reserved for permanent codes (e.g., family members). Enter slot numbers separated by commas.",
+          "lock_entity": "Select your Nimly lock entity. Works for both Zigbee2MQTT (MQTT) and ZHA managed locks — detected automatically.",
+          "door_sensor": "Optional binary sensor for the door contact. When set, open/closed state is shown in the panel header and door events are logged in the activity log.",
+          "zha_endpoint_id": "Only relevant if the lock is managed by ZHA. The Zigbee endpoint that exposes the Door Lock cluster — 11 for Nimly locks.",
+          "slot_min": "First slot number available for PIN codes (1–99, 0 is reserved)",
+          "slot_max": "Last slot number available for PIN codes (1–99)",
+          "reserved_slots": "Slots reserved for permanent codes (e.g. family members). Enter slot numbers separated by commas.",
           "auto_expire": "Automatically remove expired guest codes at the scheduled time",
           "cleanup_time": "Time of day when expired codes will be removed",
           "overwrite_protection": "Prevent accidental overwriting of existing codes"
@@ -61,64 +69,86 @@
       "invalid_slot_range": "Minimum slot must be less than maximum slot"
     }
   },
+  "entity": {
+    "binary_sensor": {
+      "auto_lock_enabled": {
+        "name": "Auto-lock Enabled"
+      }
+    },
+    "sensor": {
+      "auto_lock_delay": {
+        "name": "Auto-lock Delay"
+      },
+      "battery": {
+        "name": "Battery"
+      }
+    }
+  },
   "services": {
+    "set_auto_lock": {
+      "name": "Set Auto-lock",
+      "description": "Enable or disable the HA-side auto-lock timer.",
+      "fields": {
+        "enabled": {
+          "name": "Enabled",
+          "description": "Turn auto-lock on or off"
+        },
+        "delay_seconds": {
+          "name": "Delay (seconds)",
+          "description": "Seconds after unlocking before the lock re-locks. Range: 5–3600. Default: 300"
+        }
+      }
+    },
     "add_code": {
       "name": "Add Code",
       "description": "Add a new PIN code to the lock",
       "fields": {
-        "name": {
-          "name": "Name",
-          "description": "Friendly name for this code"
-        },
-        "pin_code": {
-          "name": "PIN Code",
-          "description": "4-digit PIN code"
-        },
-        "type": {
-          "name": "Type",
-          "description": "Code type: permanent or guest"
-        },
-        "expiry": {
-          "name": "Expiry Date",
-          "description": "Expiry date (ISO format: YYYY-MM-DD, required for guest codes)"
-        },
-        "slot": {
-          "name": "Slot Number",
-          "description": "Preferred slot number (optional, auto-selected if not provided)"
-        },
-        "force": {
-          "name": "Force Overwrite",
-          "description": "Force overwrite if slot is occupied"
-        }
+        "name": {"name": "Name", "description": "Friendly name for this code"},
+        "pin_code": {"name": "PIN Code", "description": "4–6 digit PIN code"},
+        "type": {"name": "Type", "description": "Code type: permanent or guest"},
+        "expiry": {"name": "Expiry Date", "description": "Expiry date (YYYY-MM-DD). Required for guest codes"},
+        "slot": {"name": "Slot Number", "description": "Preferred slot number (auto-selected if omitted)"},
+        "force": {"name": "Force Overwrite", "description": "Overwrite the slot even if already occupied"}
       }
     },
     "remove_code": {
       "name": "Remove Code",
       "description": "Remove a PIN code from the lock",
       "fields": {
-        "slot": {
-          "name": "Slot Number",
-          "description": "Slot number to remove"
-        }
+        "slot": {"name": "Slot Number", "description": "Slot number to remove"}
       }
     },
     "update_expiry": {
       "name": "Update Expiry",
-      "description": "Update the expiry date of a code",
+      "description": "Update the expiry date of an existing code",
       "fields": {
-        "slot": {
-          "name": "Slot Number",
-          "description": "Slot number to update"
-        },
-        "expiry": {
-          "name": "Expiry Date",
-          "description": "New expiry date (ISO format: YYYY-MM-DD, or null to remove)"
-        }
+        "slot": {"name": "Slot Number", "description": "Slot number to update"},
+        "expiry": {"name": "Expiry Date", "description": "New expiry date (YYYY-MM-DD), or empty to remove"}
+      }
+    },
+    "update_name": {
+      "name": "Update Name",
+      "description": "Update the display name of a code entry",
+      "fields": {
+        "slot": {"name": "Slot Number", "description": "Slot number to update"},
+        "name": {"name": "Name", "description": "New friendly name"}
+      }
+    },
+    "update_pin": {
+      "name": "Update PIN Code",
+      "description": "Replace the PIN code for an existing slot. Warning: the old code cannot be retrieved.",
+      "fields": {
+        "slot": {"name": "Slot Number", "description": "Slot number to update"},
+        "pin_code": {"name": "New PIN Code", "description": "New 4–6 digit PIN code"}
       }
     },
     "list_codes": {
       "name": "List Codes",
-      "description": "List all PIN codes"
+      "description": "Return all stored PIN codes"
+    },
+    "cleanup_expired": {
+      "name": "Cleanup Expired Codes",
+      "description": "Manually remove all expired guest codes from the lock and storage"
     }
   }
 }

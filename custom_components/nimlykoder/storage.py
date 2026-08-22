@@ -25,10 +25,17 @@ class CodeEntry:
     expiry: str | None
     created: str
     updated: str
+    pin: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary."""
-        return asdict(self)
+        """Convert to dictionary.
+
+        Excludes `pin` — it must never leave storage.py. Nothing outside this
+        module (services, websocket, panel) should ever see a stored PIN.
+        """
+        d = asdict(self)
+        d.pop("pin", None)
+        return d
 
     @staticmethod
     def from_dict(slot: int, data: dict[str, Any]) -> CodeEntry:
@@ -40,6 +47,7 @@ class CodeEntry:
             expiry=data.get("expiry"),
             created=data["created"],
             updated=data["updated"],
+            pin=data.get("pin"),
         )
 
 
@@ -95,6 +103,7 @@ class NimlykoderStorage:
         name: str,
         code_type: str,
         expiry: str | None = None,
+        pin: str | None = None,
     ) -> CodeEntry:
         """Add a new entry."""
         now = datetime.now().isoformat()
@@ -110,6 +119,7 @@ class NimlykoderStorage:
             "expiry": expiry,
             "created": now,
             "updated": now,
+            "pin": pin,
         }
 
         self._data[slot_str] = entry_data
@@ -136,6 +146,38 @@ class NimlykoderStorage:
 
         return CodeEntry.from_dict(slot, self._data[slot_str])
 
+    async def update_pin(self, slot: int, pin: str) -> CodeEntry:
+        """Update the stored PIN for an existing entry."""
+        slot_str = str(slot)
+        if slot_str not in self._data:
+            raise HomeAssistantError(f"Slot {slot} not found")
+
+        self._data[slot_str]["pin"] = pin
+        self._data[slot_str]["updated"] = datetime.now().isoformat()
+        await self.async_save()
+
+        return CodeEntry.from_dict(slot, self._data[slot_str])
+
+    def find_by_pin(self, pin: str, today: date | None = None) -> CodeEntry | None:
+        """Find a currently-valid entry whose stored PIN matches.
+
+        Expired guest codes don't count as a match, so a PIN typed on a
+        code that's since expired is treated the same as an unknown PIN.
+        """
+        today = today or date.today()
+        for slot_str, data in self._data.items():
+            if data.get("pin") != pin:
+                continue
+            entry = CodeEntry.from_dict(int(slot_str), data)
+            if entry.type == TYPE_GUEST and entry.expiry:
+                try:
+                    if datetime.fromisoformat(entry.expiry).date() < today:
+                        continue
+                except (ValueError, TypeError):
+                    pass
+            return entry
+        return None
+
     async def update_name(self, slot: int, name: str) -> CodeEntry:
         """Update name for a code entry."""
         slot_str = str(slot)
@@ -154,8 +196,12 @@ class NimlykoderStorage:
     def find_first_free_slot(
         self, slot_min: int, slot_max: int, reserved_slots: list[int]
     ) -> int | None:
-        """Find first available slot outside reserved range."""
-        for slot in range(slot_min, slot_max + 1):
+        """Find first available slot outside reserved range.
+
+        Slot 0 is never returned — it's reserved to mean "no specific user"
+        in decoded lock activity, regardless of configured slot_min.
+        """
+        for slot in range(max(slot_min, 1), slot_max + 1):
             if slot in reserved_slots:
                 continue
             if str(slot) not in self._data:

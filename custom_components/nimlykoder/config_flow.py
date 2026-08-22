@@ -14,18 +14,21 @@ from homeassistant.helpers import selector
 from .const import (
     DOMAIN,
     CONF_LOCK_ENTITY,
+    CONF_DOOR_SENSOR,
     CONF_SLOT_MIN,
     CONF_SLOT_MAX,
     CONF_RESERVED_SLOTS,
     CONF_AUTO_EXPIRE,
     CONF_CLEANUP_TIME,
     CONF_OVERWRITE_PROTECTION,
+    CONF_ZHA_ENDPOINT_ID,
     DEFAULT_SLOT_MIN,
     DEFAULT_SLOT_MAX,
     DEFAULT_RESERVED_SLOTS,
     DEFAULT_AUTO_EXPIRE,
     DEFAULT_CLEANUP_TIME,
     DEFAULT_OVERWRITE_PROTECTION,
+    DEFAULT_ZHA_ENDPOINT_ID,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -86,8 +89,16 @@ class NimlykoderConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required(CONF_LOCK_ENTITY): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="lock")
                 ),
+                vol.Optional(CONF_DOOR_SENSOR): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="binary_sensor")
+                ),
+                vol.Optional(
+                    CONF_ZHA_ENDPOINT_ID, default=DEFAULT_ZHA_ENDPOINT_ID
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=1, max=255, mode="box")
+                ),
                 vol.Required(CONF_SLOT_MIN, default=DEFAULT_SLOT_MIN): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=0, max=99, mode="box")
+                    selector.NumberSelectorConfig(min=1, max=99, mode="box")
                 ),
                 vol.Required(CONF_SLOT_MAX, default=DEFAULT_SLOT_MAX): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=0, max=99, mode="box")
@@ -141,6 +152,8 @@ class NimlykoderOptionsFlow(config_entries.OptionsFlow):
         # Get current options with safe defaults
         options = self.config_entry.options or {}
 
+        door_sensor = options.get(CONF_DOOR_SENSOR) or None
+
         # Format reserved_slots for display
         current_reserved = options.get(CONF_RESERVED_SLOTS)
         if current_reserved is None:
@@ -155,6 +168,8 @@ class NimlykoderOptionsFlow(config_entries.OptionsFlow):
         slot_min = options.get(CONF_SLOT_MIN)
         if slot_min is None:
             slot_min = DEFAULT_SLOT_MIN
+        # Slot 0 is reserved and no longer a valid slot_min — clamp older configs up.
+        slot_min = max(int(slot_min), 1)
         slot_max = options.get(CONF_SLOT_MAX)
         if slot_max is None:
             slot_max = DEFAULT_SLOT_MAX
@@ -165,6 +180,9 @@ class NimlykoderOptionsFlow(config_entries.OptionsFlow):
         overwrite_protection = options.get(CONF_OVERWRITE_PROTECTION)
         if overwrite_protection is None:
             overwrite_protection = DEFAULT_OVERWRITE_PROTECTION
+        zha_endpoint_id = options.get(CONF_ZHA_ENDPOINT_ID)
+        if zha_endpoint_id is None:
+            zha_endpoint_id = DEFAULT_ZHA_ENDPOINT_ID
 
         data_schema = vol.Schema(
             {
@@ -174,11 +192,23 @@ class NimlykoderOptionsFlow(config_entries.OptionsFlow):
                 ): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="lock")
                 ),
+                vol.Optional(
+                    CONF_DOOR_SENSOR,
+                    description={"suggested_value": door_sensor},
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="binary_sensor")
+                ),
+                vol.Optional(
+                    CONF_ZHA_ENDPOINT_ID,
+                    default=zha_endpoint_id,
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=1, max=255, mode="box")
+                ),
                 vol.Required(
                     CONF_SLOT_MIN,
                     default=slot_min,
                 ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=0, max=99, mode="box")
+                    selector.NumberSelectorConfig(min=1, max=99, mode="box")
                 ),
                 vol.Required(
                     CONF_SLOT_MAX,

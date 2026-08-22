@@ -35,8 +35,8 @@
     "name": "Namn",
     "name_placeholder": "t.ex. Johan Andersson",
     "pin_code": "PIN-kod",
-    "pin_placeholder": "6 siffror",
-    "pin_hint": "Ange en 6-siffrig PIN-kod",
+    "pin_placeholder": "4-6 siffror",
+    "pin_hint": "Ange en 4-6 siffrig PIN-kod",
     "change_pin": "Ändra PIN-kod",
     "pin_change_warning": "Lämna tomt för att behålla nuvarande PIN-kod",
     "confirm_pin_change": "Bekräfta ändring av PIN",
@@ -60,7 +60,7 @@
   },
   "errors": {
     "name_required": "Namn krävs",
-    "pin_invalid": "PIN-koden måste vara exakt 6 siffror"
+    "pin_invalid": "PIN-koden måste vara 4-6 siffror"
   },
   "empty": {
     "title": "Inga PIN-koder ännu",

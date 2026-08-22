@@ -25,14 +25,15 @@ async def async_register_panel(hass: HomeAssistant) -> None:
             [StaticPathConfig(f"/{DOMAIN}_panel", str(frontend_path), cache_headers=False)]
         )
 
-        # Register the custom panel
+        # Register the custom panel — version bump forces browser cache invalidation
+        _PANEL_VERSION = "20260816-2"
         await panel_custom.async_register_panel(
             hass,
             webcomponent_name="nimlykoder-panel",
             frontend_url_path=PANEL_NAME,
             sidebar_title=PANEL_TITLE,
             sidebar_icon=PANEL_ICON,
-            module_url=f"/{DOMAIN}_panel/nimlykoder-panel.js",
+            module_url=f"/{DOMAIN}_panel/nimlykoder-panel.js?v={_PANEL_VERSION}",
             embed_iframe=False,
             require_admin=False,
         )

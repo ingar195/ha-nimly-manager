@@ -3,12 +3,68 @@
   "subtitle": "Manage PIN codes for your Nimly lock",
   "add_code": "Add Code",
   "search_placeholder": "Search by name, slot, or type...",
+
+  "lock": {
+    "locked": "Locked",
+    "unlocked": "Unlocked",
+    "unknown_state": "Unknown",
+    "lock": "Lock",
+    "unlock": "Unlock"
+  },
+
+  "door": {
+    "open": "Open",
+    "closed": "Closed"
+  },
+
+  "auto_lock": {
+    "badge_on": "Auto-lock: {delay}",
+    "badge_off": "Auto-lock: Off",
+    "settings": "Auto-lock settings",
+    "dialog_title": "Auto-lock settings",
+    "enable": "Enable auto-lock",
+    "enable_sub": "Automatically re-locks after unlocking",
+    "delay": "Delay"
+  },
+
+  "logbook": {
+    "title": "Activity Log",
+    "refresh": "Refresh",
+    "empty": "No activity recorded yet"
+  },
+
+  "activity": {
+    "unknown": "Unknown",
+    "auto_lock": "Auto-lock",
+    "door_open": "Door opened",
+    "door_close": "Door closed",
+    "verb_lock": "locked",
+    "verb_unlock": "unlocked",
+    "with_code": "with code",
+    "with_fingerprint": "with fingerprint",
+    "with_rfid": "with RFID",
+    "via_zigbee": "via Zigbee",
+    "manually": "manually",
+    "wrong_code_unlock": "wrong code (unlock attempt)",
+    "wrong_code_lock": "wrong code (lock attempt)"
+  },
+
+  "time": {
+    "just_now": "Just now",
+    "minutes_ago": "{n} min ago",
+    "hours_ago": "{n}h ago",
+    "seconds_unit": "s",
+    "minutes_unit": "m",
+    "hours_unit": "h"
+  },
+
   "stats": {
     "total": "Total Codes",
     "permanent": "Permanent",
     "guest": "Guest",
     "expired": "Expired"
   },
+
   "table": {
     "slot": "Slot",
     "name": "Name",
@@ -17,15 +73,18 @@
     "status": "Status",
     "actions": "Actions"
   },
+
   "status": {
     "active": "Active",
     "expired": "Expired",
     "reserved": "Reserved"
   },
+
   "type": {
     "permanent": "Permanent",
     "guest": "Guest"
   },
+
   "dialog": {
     "add_title": "Add New Person",
     "edit_title": "Edit Person",
@@ -35,8 +94,8 @@
     "name": "Name",
     "name_placeholder": "e.g., John Doe",
     "pin_code": "PIN Code",
-    "pin_placeholder": "6 digits",
-    "pin_hint": "Enter a 6 digit PIN code",
+    "pin_placeholder": "4–6 digits",
+    "pin_hint": "Enter a 4–6 digit PIN code",
     "change_pin": "Change PIN Code",
     "pin_change_warning": "Leave empty to keep the current PIN code",
     "confirm_pin_change": "Confirm PIN Change",
@@ -58,30 +117,64 @@
     "add": "Add Person",
     "remove": "Remove"
   },
+
+  "lock_settings": {
+    "dialog_title": "Lock Settings",
+    "load": "Load from lock",
+    "loading": "Reading from lock…",
+    "save_all": "Save All",
+    "saving": "Saving…",
+    "wake_hint": "The lock must be awake — press any key on the keypad first.",
+    "not_zha": "Lock settings are only available for ZHA-managed locks.",
+    "read_error": "Could not read settings: {error}",
+    "write_error": "Could not save {setting}: {error}",
+    "sound_volume": "Volume",
+    "sound_volume_hint": "Keypad beep volume",
+    "sound_0": "Silent",
+    "sound_1": "Low",
+    "sound_2": "High",
+    "enable_one_touch_locking": "One-touch locking",
+    "enable_one_touch_locking_hint": "Lock by pressing the keypad without a PIN",
+    "enable_privacy_mode_button": "Privacy mode button",
+    "enable_privacy_mode_button_hint": "Inside button that blocks all external codes",
+    "wrong_code_attempt_limit": "Wrong-code limit",
+    "wrong_code_attempt_limit_hint": "Number of wrong attempts before temporary lockout (1–10)",
+    "user_code_temporary_disable_time": "Lockout duration",
+    "user_code_temporary_disable_time_hint": "Seconds of lockout after too many wrong codes (0 = permanent until reset)"
+  },
+
   "errors": {
     "name_required": "Name is required",
-    "pin_invalid": "PIN code must be exactly 6 digits"
+    "pin_invalid": "PIN code must be 4–6 digits",
+    "lock_failed": "Could not lock: {error}",
+    "unlock_failed": "Could not unlock: {error}",
+    "auto_lock_save_failed": "Could not save auto-lock settings: {error}"
   },
+
   "empty": {
     "title": "No PIN codes yet",
     "description": "Add your first person to get started with Nimlykoder",
     "add_first": "Add First Person"
   },
+
   "no_results": {
     "title": "No results found",
     "description": "Try a different search term"
   },
+
   "loading": "Loading codes...",
   "retry": "Retry",
   "expires": "Expires",
   "expired_on": "Expired",
   "slot_label": "Slot",
+
   "expired_info": {
     "title": "Expired Codes",
     "description": "Expired codes have passed their set expiry date and are no longer valid for entry.",
     "auto_cleanup": "Auto-cleanup is enabled. Expired codes will be automatically removed at {time}.",
     "manual_cleanup": "Auto-cleanup is disabled. Remove expired codes manually."
   },
+
   "messages": {
     "code_added": "Code added successfully",
     "code_removed": "Code removed successfully",

@@ -10,6 +10,7 @@ import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 
 from .const import (
     DOMAIN,
@@ -22,11 +23,21 @@ from .const import (
     WS_TYPE_SUGGEST_SLOTS,
     WS_TYPE_CONFIG,
     WS_TYPE_TRANSLATIONS,
+    WS_TYPE_SET_AUTO_LOCK,
+    WS_TYPE_ACTIVITY,
+    WS_TYPE_GET_LOCK_SETTINGS,
+    WS_TYPE_SET_LOCK_SETTING,
     TYPE_PERMANENT,
     TYPE_GUEST,
     CONF_AUTO_EXPIRE,
     CONF_CLEANUP_TIME,
+    CONF_LOCK_ENTITY,
+    CONF_ZHA_ENDPOINT_ID,
+    DEFAULT_ZHA_ENDPOINT_ID,
+    OPT_AUTO_LOCK_ENABLED,
+    OPT_AUTO_LOCK_DELAY,
 )
+from .zha_helpers import get_doorlock_cluster, LOCK_SETTINGS
 
 _LOGGER = logging.getLogger(__name__)
 PANEL_TRANSLATION_KEYS = frozenset({"title", "subtitle", "add_code"})
@@ -44,6 +55,10 @@ def async_register_websocket_handlers(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, handle_suggest_slots)
     websocket_api.async_register_command(hass, handle_config)
     websocket_api.async_register_command(hass, handle_translations)
+    websocket_api.async_register_command(hass, handle_set_auto_lock)
+    websocket_api.async_register_command(hass, handle_activity)
+    websocket_api.async_register_command(hass, handle_get_lock_settings)
+    websocket_api.async_register_command(hass, handle_set_lock_setting)
 
 
 @websocket_api.websocket_command(
@@ -103,10 +118,10 @@ async def handle_add(
         preferred_slot = msg.get("slot")
         force = msg.get("force", False)
 
-        # Validate PIN code is 6 digits
-        if not pin_code.isdigit() or len(pin_code) != 6:
+        # Validate PIN code is 4-6 digits
+        if not pin_code.isdigit() or not 4 <= len(pin_code) <= 6:
             connection.send_error(
-                msg["id"], "invalid_input", "PIN code must be exactly 6 digits"
+                msg["id"], "invalid_input", "PIN code must be 4-6 digits"
             )
             return
 
@@ -130,6 +145,13 @@ async def handle_add(
         # Determine slot
         if preferred_slot is not None:
             slot = preferred_slot
+            # Slot 0 means "no specific user" in decoded lock activity —
+            # never allow a real code to occupy it, regardless of slot_min.
+            if slot == 0:
+                connection.send_error(
+                    msg["id"], "invalid_slot", "Slot 0 is reserved and cannot be used"
+                )
+                return
             # Check bounds
             if slot < config["slot_min"] or slot > config["slot_max"]:
                 connection.send_error(
@@ -167,27 +189,28 @@ async def handle_add(
             )
             return
 
-        # Add to MQTT first
+        # Send to the lock first (via ZHA or MQTT, depending on configured adapter)
         try:
             await mqtt_adapter.add_code(slot, pin_code)
         except Exception as err:
             connection.send_error(
-                msg["id"], "mqtt_error", f"Failed to add code via MQTT: {err}"
+                msg["id"], "adapter_error", f"Failed to add code to lock: {err}"
             )
             return
 
         # Then store
         try:
-            entry = await storage.add(slot, name, code_type, expiry)
+            entry = await storage.add(slot, name, code_type, expiry, pin=pin_code)
             _LOGGER.info("Added %s code '%s' to slot %s", code_type, name, slot)
             connection.send_result(msg["id"], {"entry": entry.to_dict()})
         except Exception as err:
-            # Try to clean up MQTT if storage fails
+            # Try to clean up lock if storage fails
             try:
                 await mqtt_adapter.remove_code(slot)
             except Exception:
                 pass
             connection.send_error(msg["id"], "storage_error", str(err))
+            return
 
     except Exception as err:
         _LOGGER.error("Error adding code: %s", err)
@@ -220,12 +243,12 @@ async def handle_remove(
             connection.send_error(msg["id"], "not_found", f"Slot {slot} not found")
             return
 
-        # Remove from MQTT
+        # Remove from the lock
         try:
             await mqtt_adapter.remove_code(slot)
         except Exception as err:
             connection.send_error(
-                msg["id"], "mqtt_error", f"Failed to remove code via MQTT: {err}"
+                msg["id"], "adapter_error", f"Failed to remove code from lock: {err}"
             )
             return
 
@@ -321,6 +344,7 @@ async def handle_update_name(
             connection.send_result(msg["id"], {"entry": entry.to_dict()})
         except Exception as err:
             connection.send_error(msg["id"], "update_failed", str(err))
+            return
 
     except Exception as err:
         _LOGGER.error("Error updating name: %s", err)
@@ -355,28 +379,28 @@ async def handle_update_pin(
             connection.send_error(msg["id"], "not_found", f"Slot {slot} not found")
             return
 
-        # Validate PIN code is 6 digits
-        if not pin_code.isdigit() or len(pin_code) != 6:
+        # Validate PIN code is 4-6 digits
+        if not pin_code.isdigit() or not 4 <= len(pin_code) <= 6:
             connection.send_error(
-                msg["id"], "invalid_input", "PIN code must be exactly 6 digits"
+                msg["id"], "invalid_input", "PIN code must be 4-6 digits"
             )
             return
 
-        # Send new PIN to lock via MQTT
-        _LOGGER.info("Updating PIN for slot %s via MQTT", slot)
+        # Send new PIN to the lock (via ZHA or MQTT, depending on configured adapter)
+        _LOGGER.info("Updating PIN for slot %s", slot)
         try:
             await mqtt_adapter.add_code(slot, pin_code)
         except Exception as err:
             connection.send_error(
-                msg["id"], "mqtt_error", f"Failed to update PIN via MQTT: {err}"
+                msg["id"], "adapter_error", f"Failed to update PIN on lock: {err}"
             )
             return
 
-        # Update the 'updated' timestamp in storage
+        # Persist the new PIN in storage
         try:
-            entry = await storage.update_name(slot, entry.name)  # This updates the timestamp
+            entry = await storage.update_pin(slot, pin_code)
         except Exception as err:
-            _LOGGER.warning("Failed to update timestamp: %s", err)
+            _LOGGER.warning("Failed to persist PIN in storage: %s", err)
 
         _LOGGER.info("Successfully updated PIN for slot %s", slot)
         connection.send_result(msg["id"], {"success": True, "entry": entry.to_dict()})
@@ -407,7 +431,7 @@ async def handle_suggest_slots(
         count = msg.get("count", 5)
         suggestions = []
 
-        for slot in range(config["slot_min"], config["slot_max"] + 1):
+        for slot in range(max(config["slot_min"], 1), config["slot_max"] + 1):
             if len(suggestions) >= count:
                 break
             if slot in config["reserved_slots"]:
@@ -438,11 +462,52 @@ async def handle_config(
         data = hass.data[DOMAIN]
         config = data["config"]
 
+        # Read auto-lock state from nimlykoder's own config entry
+        entry = data["entry"]
+        auto_lock_enabled = bool(entry.options.get(OPT_AUTO_LOCK_ENABLED, False))
+        auto_lock_delay = int(entry.options.get(OPT_AUTO_LOCK_DELAY, 300))
+
+        # Auto-discover the ZHA battery sensor on the same device as the lock.
+        # Returns the entity_id so the panel can watch hass.states directly.
+        # Find battery sensor: prefer the nimlykoder-owned one, fall back to ZHA.
+        battery_entity = None
+        lock_entity_id = config.get(CONF_LOCK_ENTITY, "")
+        try:
+            ent_reg = er.async_get(hass)
+            # 1. Look for nimlykoder battery entity (always reliable)
+            nimly_battery = f"{entry.entry_id}_battery"
+            for ent in ent_reg.entities.values():
+                if ent.unique_id == nimly_battery and not ent.disabled_by:
+                    battery_entity = ent.entity_id
+                    break
+            # 2. Fallback: ZHA battery sensor on the same device
+            if battery_entity is None and lock_entity_id:
+                lock_entry = ent_reg.async_get(lock_entity_id)
+                if lock_entry and lock_entry.device_id:
+                    for ent in er.async_entries_for_device(ent_reg, lock_entry.device_id):
+                        if ent.domain != "sensor" or ent.disabled_by:
+                            continue
+                        dc = str(ent.device_class or ent.original_device_class or "")
+                        if dc == "battery":
+                            battery_entity = ent.entity_id
+                            break
+                        state = hass.states.get(ent.entity_id)
+                        if state and state.attributes.get("device_class") == "battery":
+                            battery_entity = ent.entity_id
+                            break
+        except Exception:
+            pass
+
         connection.send_result(
             msg["id"],
             {
                 "auto_expire": config.get(CONF_AUTO_EXPIRE, True),
                 "cleanup_time": config.get(CONF_CLEANUP_TIME, "03:00:00"),
+                "lock_entity": lock_entity_id,
+                "door_sensor": entry.options.get("door_sensor") or None,
+                "battery_entity": battery_entity,
+                "auto_lock_enabled": auto_lock_enabled,
+                "auto_lock_delay": auto_lock_delay,
             },
         )
 
@@ -508,3 +573,170 @@ async def handle_translations(
     except Exception as err:
         _LOGGER.error("Error getting translations: %s", err)
         connection.send_error(msg["id"], "translations_failed", str(err))
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_TYPE_SET_AUTO_LOCK,
+        vol.Required("enabled"): bool,
+        vol.Optional("delay", default=300): int,
+    }
+)
+@websocket_api.async_response
+async def handle_set_auto_lock(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Enable or disable persistent auto-lock, stored in nimlykoder's config entry.
+
+    The auto-lock listener in __init__.py reads entry.options live, so the
+    change takes effect immediately without a restart.
+    """
+    try:
+        enabled = msg["enabled"]
+        delay = max(5, int(msg.get("delay", 300)))
+
+        data = hass.data.get(DOMAIN)
+        if not data:
+            connection.send_error(msg["id"], "set_auto_lock_failed", "Nimlykoder not loaded")
+            return
+
+        entry = data["entry"]
+        new_options = {
+            **entry.options,
+            OPT_AUTO_LOCK_ENABLED: enabled,
+            OPT_AUTO_LOCK_DELAY: delay,
+        }
+        hass.config_entries.async_update_entry(entry, options=new_options)
+
+        _LOGGER.info(
+            "Auto-lock %s (delay=%ds) saved to nimlykoder config entry",
+            "enabled" if enabled else "disabled",
+            delay,
+        )
+
+        connection.send_result(
+            msg["id"],
+            {"success": True, "enabled": enabled, "delay": delay},
+        )
+
+    except Exception as err:
+        _LOGGER.error("Error setting auto-lock: %s", err)
+        connection.send_error(msg["id"], "set_auto_lock_failed", str(err))
+
+
+@websocket_api.websocket_command({vol.Required("type"): WS_TYPE_ACTIVITY})
+@websocket_api.async_response
+async def handle_activity(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Return the in-memory activity log for the nimlykoder lock."""
+    try:
+        data = hass.data.get(DOMAIN, {})
+        log = data.get("activity_log", [])
+        connection.send_result(msg["id"], {"entries": log})
+    except Exception as err:
+        _LOGGER.error("Error getting activity log: %s", err)
+        connection.send_error(msg["id"], "activity_failed", str(err))
+
+
+@websocket_api.websocket_command({vol.Required("type"): WS_TYPE_GET_LOCK_SETTINGS})
+@websocket_api.async_response
+async def handle_get_lock_settings(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Read current DoorLock settings directly from the Zigbee device."""
+    data = hass.data.get(DOMAIN, {})
+    zha_ieee = data.get("zha_ieee")
+    endpoint_id = data.get("config", {}).get(CONF_ZHA_ENDPOINT_ID, DEFAULT_ZHA_ENDPOINT_ID)
+
+    if not zha_ieee:
+        connection.send_error(msg["id"], "not_zha", "Lock is not a ZHA device")
+        return
+
+    cluster = get_doorlock_cluster(hass, zha_ieee, endpoint_id)
+    if cluster is None:
+        connection.send_error(
+            msg["id"], "cluster_unavailable",
+            "DoorLock cluster not reachable — interact with the lock first to wake it"
+        )
+        return
+
+    attr_ids = [meta["attr_id"] for meta in LOCK_SETTINGS.values()]
+    try:
+        result, _failed = await cluster.read_attributes(attr_ids, allow_cache=False)
+    except Exception as err:
+        connection.send_error(msg["id"], "read_failed", str(err))
+        return
+
+    # Build response keyed by setting name; value may be an enum — coerce to int/bool
+    settings = {}
+    for name, meta in LOCK_SETTINGS.items():
+        raw = result.get(meta["attr_id"])
+        if raw is None:
+            # Try by attribute name in case zigpy keyed by name
+            raw = result.get(name)
+        if raw is None:
+            continue
+        try:
+            settings[name] = bool(raw) if meta["type"] == "bool" else int(raw)
+        except Exception:
+            settings[name] = raw
+
+    connection.send_result(msg["id"], {"settings": settings, "schema": LOCK_SETTINGS})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_TYPE_SET_LOCK_SETTING,
+        vol.Required("setting"): str,
+        vol.Required("value"): vol.Any(bool, int),
+    }
+)
+@websocket_api.async_response
+async def handle_set_lock_setting(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Write a single DoorLock attribute to the Zigbee device."""
+    setting = msg["setting"]
+    if setting not in LOCK_SETTINGS:
+        connection.send_error(msg["id"], "invalid_setting", f"Unknown setting: {setting}")
+        return
+
+    data = hass.data.get(DOMAIN, {})
+    zha_ieee = data.get("zha_ieee")
+    endpoint_id = data.get("config", {}).get(CONF_ZHA_ENDPOINT_ID, DEFAULT_ZHA_ENDPOINT_ID)
+
+    if not zha_ieee:
+        connection.send_error(msg["id"], "not_zha", "Lock is not a ZHA device")
+        return
+
+    cluster = get_doorlock_cluster(hass, zha_ieee, endpoint_id)
+    if cluster is None:
+        connection.send_error(
+            msg["id"], "cluster_unavailable",
+            "DoorLock cluster not reachable — interact with the lock first to wake it"
+        )
+        return
+
+    meta = LOCK_SETTINGS[setting]
+    value = msg["value"]
+    if meta["type"] == "bool":
+        value = bool(value)
+    elif meta["type"] in ("int", "select"):
+        value = int(value)
+
+    try:
+        result = await cluster.write_attributes({setting: value})
+        _LOGGER.info("Lock setting %s set to %s (result=%s)", setting, value, result)
+        connection.send_result(msg["id"], {"success": True, "setting": setting, "value": value})
+    except Exception as err:
+        _LOGGER.error("Error writing lock setting %s=%s: %s", setting, value, err)
+        connection.send_error(msg["id"], "write_failed", str(err))

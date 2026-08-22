@@ -11,7 +11,7 @@ add_code:
         text:
     pin_code:
       name: PIN Code
-      description: 6-digit PIN code
+      description: 4-6 digit PIN code
       required: true
       example: "123456"
       selector:
@@ -123,7 +123,7 @@ update_pin:
           mode: box
     pin_code:
       name: New PIN Code
-      description: New 6-digit PIN code
+      description: New 4-6 digit PIN code
       required: true
       example: "654321"
       selector:

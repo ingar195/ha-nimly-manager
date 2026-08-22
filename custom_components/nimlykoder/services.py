@@ -13,6 +13,7 @@ import homeassistant.helpers.config_validation as cv
 from .const import (
     DOMAIN,
     CONF_MQTT_TOPIC,
+    SERVICE_SET_AUTO_LOCK,
     SERVICE_ADD_CODE,
     SERVICE_REMOVE_CODE,
     SERVICE_UPDATE_EXPIRY,
@@ -22,6 +23,8 @@ from .const import (
     SERVICE_CLEANUP_EXPIRED,
     TYPE_PERMANENT,
     TYPE_GUEST,
+    OPT_AUTO_LOCK_ENABLED,
+    OPT_AUTO_LOCK_DELAY,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -65,6 +68,15 @@ SERVICE_UPDATE_PIN_SCHEMA = vol.Schema(
     }
 )
 
+SERVICE_SET_AUTO_LOCK_SCHEMA = vol.Schema(
+    {
+        vol.Required("enabled"): cv.boolean,
+        vol.Optional("delay_seconds", default=300): vol.All(
+            vol.Coerce(int), vol.Range(min=5, max=3600)
+        ),
+    }
+)
+
 
 async def async_setup_services(hass: HomeAssistant) -> None:
     """Set up services for Nimlykoder."""
@@ -94,10 +106,10 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             force,
         )
 
-        # Validate PIN code is 6 digits
-        if not pin_code.isdigit() or len(pin_code) != 6:
-            _LOGGER.error("[handle_add_code] Invalid PIN code: must be exactly 6 digits")
-            raise HomeAssistantError("PIN code must be exactly 6 digits")
+        # Validate PIN code is 4-6 digits
+        if not pin_code.isdigit() or not 4 <= len(pin_code) <= 6:
+            _LOGGER.error("[handle_add_code] Invalid PIN code: must be 4-6 digits")
+            raise HomeAssistantError("PIN code must be 4-6 digits")
 
         # Policy enforcement
         if code_type == TYPE_GUEST and not expiry:
@@ -117,6 +129,11 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         if preferred_slot is not None:
             slot = preferred_slot
             _LOGGER.debug("[handle_add_code] Using preferred slot: %d", slot)
+            # Slot 0 means "no specific user" in decoded lock activity —
+            # never allow a real code to occupy it, regardless of slot_min.
+            if slot == 0:
+                _LOGGER.error("[handle_add_code] Slot 0 is reserved and cannot be used")
+                raise HomeAssistantError("Slot 0 is reserved and cannot be used")
             # Check bounds
             if slot < config[
                 "slot_min"
@@ -158,24 +175,24 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             _LOGGER.error("[handle_add_code] Slot %d is reserved", slot)
             raise HomeAssistantError(f"Slot {slot} is reserved")
 
-        # Add to MQTT first
+        # Send to the lock first (via ZHA or MQTT, depending on configured adapter)
         _LOGGER.info(
-            "[handle_add_code] Sending PIN to lock via MQTT - slot=%d, topic=%s",
+            "[handle_add_code] Sending PIN to lock - slot=%d, topic=%s",
             slot,
-            config.get(CONF_MQTT_TOPIC, "unknown"),
+            config.get(CONF_MQTT_TOPIC, "n/a (ZHA)"),
         )
         try:
             await mqtt_adapter.add_code(slot, pin_code)
-            _LOGGER.info("[handle_add_code] MQTT publish successful for slot %d", slot)
+            _LOGGER.info("[handle_add_code] Adapter publish successful for slot %d", slot)
         except Exception as err:
             _LOGGER.error(
-                "[handle_add_code] MQTT publish failed for slot %d: %s", slot, err
+                "[handle_add_code] Adapter publish failed for slot %d: %s", slot, err
             )
-            raise HomeAssistantError(f"Failed to add code via MQTT: {err}") from err
+            raise HomeAssistantError(f"Failed to add code to lock: {err}") from err
 
         # Then store
         try:
-            await storage.add(slot, name, code_type, expiry)
+            await storage.add(slot, name, code_type, expiry, pin=pin_code)
             _LOGGER.info(
                 "[handle_add_code] Successfully added %s code '%s' to slot %d",
                 code_type,
@@ -184,17 +201,17 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             )
         except Exception as err:
             _LOGGER.error(
-                "[handle_add_code] Storage failed for slot %d, rolling back MQTT: %s",
+                "[handle_add_code] Storage failed for slot %d, rolling back lock adapter: %s",
                 slot,
                 err,
             )
-            # Try to clean up MQTT if storage fails
+            # Try to clean up the lock adapter if storage fails
             try:
                 await mqtt_adapter.remove_code(slot)
-                _LOGGER.info("[handle_add_code] MQTT rollback successful")
+                _LOGGER.info("[handle_add_code] Adapter rollback successful")
             except Exception as rollback_err:
                 _LOGGER.error(
-                    "[handle_add_code] MQTT rollback also failed: %s", rollback_err
+                    "[handle_add_code] Adapter rollback also failed: %s", rollback_err
                 )
             raise
 
@@ -219,17 +236,17 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             "[handle_remove_code] Removing code '%s' from slot %d", entry.name, slot
         )
 
-        # Remove from MQTT
+        # Remove from the lock (via ZHA or MQTT, depending on configured adapter)
         _LOGGER.info(
-            "[handle_remove_code] Sending remove command via MQTT - slot=%d, topic=%s",
+            "[handle_remove_code] Sending remove command to lock - slot=%d, topic=%s",
             slot,
-            config.get(CONF_MQTT_TOPIC, "unknown"),
+            config.get(CONF_MQTT_TOPIC, "n/a (ZHA)"),
         )
         try:
             await mqtt_adapter.remove_code(slot)
-            _LOGGER.info("[handle_remove_code] MQTT remove successful for slot %d", slot)
+            _LOGGER.info("[handle_remove_code] Adapter remove successful for slot %d", slot)
         except Exception as err:
-            raise HomeAssistantError(f"Failed to remove code via MQTT: {err}") from err
+            raise HomeAssistantError(f"Failed to remove code from lock: {err}") from err
 
         # Remove from storage
         await storage.remove(slot)
@@ -310,31 +327,47 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             _LOGGER.error("[handle_update_pin] Slot %d not found", slot)
             raise HomeAssistantError(f"Slot {slot} not found")
 
-        # Validate PIN code is 6 digits
-        if not pin_code.isdigit() or len(pin_code) != 6:
+        # Validate PIN code is 4-6 digits
+        if not pin_code.isdigit() or not 4 <= len(pin_code) <= 6:
             _LOGGER.error("[handle_update_pin] Invalid PIN code format")
-            raise HomeAssistantError("PIN code must be exactly 6 digits")
+            raise HomeAssistantError("PIN code must be 4-6 digits")
 
-        # Send new PIN to lock via MQTT
+        # Send new PIN to the lock (via ZHA or MQTT, depending on configured adapter)
         _LOGGER.info(
-            "[handle_update_pin] Sending new PIN to lock for slot %d via MQTT",
+            "[handle_update_pin] Sending new PIN to lock for slot %d",
             slot,
         )
         try:
             await mqtt_adapter.add_code(slot, pin_code)
             _LOGGER.info("[handle_update_pin] Successfully updated PIN for slot %d", slot)
         except Exception as err:
-            _LOGGER.error("[handle_update_pin] MQTT publish failed: %s", err)
-            raise HomeAssistantError(f"Failed to update PIN via MQTT: {err}") from err
+            _LOGGER.error("[handle_update_pin] Adapter publish failed: %s", err)
+            raise HomeAssistantError(f"Failed to update PIN on lock: {err}") from err
 
-        # Update the 'updated' timestamp in storage
+        # Persist the new PIN in storage
         try:
-            # We just touch the entry to update the timestamp
-            current_entry = storage.get(slot)
-            if current_entry:
-                await storage.update_name(slot, current_entry.name)  # This updates the timestamp
+            await storage.update_pin(slot, pin_code)
         except Exception as err:
-            _LOGGER.warning("[handle_update_pin] Failed to update timestamp: %s", err)
+            _LOGGER.warning("[handle_update_pin] Failed to persist PIN in storage: %s", err)
+
+    async def handle_set_auto_lock(call: ServiceCall) -> None:
+        """Enable or disable the HA-side auto-lock timer."""
+        data = hass.data[DOMAIN]
+        entry = data["entry"]
+        enabled = call.data["enabled"]
+        delay = call.data.get("delay_seconds", 300)
+
+        new_options = {
+            **entry.options,
+            OPT_AUTO_LOCK_ENABLED: enabled,
+            OPT_AUTO_LOCK_DELAY: delay,
+        }
+        hass.config_entries.async_update_entry(entry, options=new_options)
+        _LOGGER.info(
+            "Auto-lock %s (delay=%ds) via service call",
+            "enabled" if enabled else "disabled",
+            delay,
+        )
 
     async def handle_cleanup_expired(call: ServiceCall) -> None:
         """Handle cleanup_expired service call - manually trigger expired code cleanup."""
@@ -365,12 +398,12 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                 name = entry.name if entry else f"Slot {slot}"
 
                 _LOGGER.info(
-                    "[handle_cleanup_expired] Removing expired code '%s' from slot %d via MQTT",
+                    "[handle_cleanup_expired] Removing expired code '%s' from slot %d",
                     name,
                     slot,
                 )
-                
-                # Remove from MQTT/lock
+
+                # Remove from the lock
                 await mqtt_adapter.remove_code(slot)
                 # Remove from storage
                 await storage.remove(slot)
@@ -396,6 +429,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         return {"removed": len(removed_slots), "slots": removed_slots}
 
     # Register services
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SET_AUTO_LOCK,
+        handle_set_auto_lock,
+        schema=SERVICE_SET_AUTO_LOCK_SCHEMA,
+    )
+
     hass.services.async_register(
         DOMAIN,
         SERVICE_ADD_CODE,
@@ -449,6 +489,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
 async def async_unload_services(hass: HomeAssistant) -> None:
     """Unload services."""
+    hass.services.async_remove(DOMAIN, SERVICE_SET_AUTO_LOCK)
     hass.services.async_remove(DOMAIN, SERVICE_ADD_CODE)
     hass.services.async_remove(DOMAIN, SERVICE_REMOVE_CODE)
     hass.services.async_remove(DOMAIN, SERVICE_UPDATE_EXPIRY)
