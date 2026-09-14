@@ -26,6 +26,8 @@ class CodeEntry:
     created: str
     updated: str
     pin: str | None = None
+    start: str | None = None
+    activated: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary.
@@ -48,6 +50,10 @@ class CodeEntry:
             created=data["created"],
             updated=data["updated"],
             pin=data.get("pin"),
+            start=data.get("start"),
+            # Entries written before this field existed had no concept of a
+            # pending start — treat them as already active.
+            activated=data.get("activated", True),
         )
 
 
@@ -97,6 +103,14 @@ class NimlykoderStorage:
             return None
         return CodeEntry.from_dict(slot, self._data[slot_str])
 
+    @staticmethod
+    def _parse_date(value: str, field: str) -> date:
+        """Parse an ISO date/datetime string, raising a friendly error."""
+        try:
+            return datetime.fromisoformat(value).date()
+        except (ValueError, TypeError) as err:
+            raise HomeAssistantError(f"Invalid {field} date: {value}") from err
+
     async def add(
         self,
         slot: int,
@@ -104,14 +118,29 @@ class NimlykoderStorage:
         code_type: str,
         expiry: str | None = None,
         pin: str | None = None,
+        start: str | None = None,
     ) -> CodeEntry:
-        """Add a new entry."""
+        """Add a new entry.
+
+        `start` is an optional scheduled-start date (ISO date/datetime). If it
+        falls after today, the entry is stored as not yet `activated` — the
+        caller is expected to hold off pushing the PIN to the physical lock
+        until then (see NimlykoderStorage.pending_start_slots /
+        mark_activated), so the code simply won't work at the keypad before
+        its start date even though it already exists in storage.
+        """
         now = datetime.now().isoformat()
         slot_str = str(slot)
 
         # Validate type and expiry
         if code_type == TYPE_GUEST and expiry is None:
             raise HomeAssistantError("Guest codes must have an expiry date")
+
+        activated = True
+        if start:
+            start_date = self._parse_date(start, "start")
+            if start_date > date.today():
+                activated = False
 
         entry_data = {
             "name": name,
@@ -120,6 +149,8 @@ class NimlykoderStorage:
             "created": now,
             "updated": now,
             "pin": pin,
+            "start": start,
+            "activated": activated,
         }
 
         self._data[slot_str] = entry_data
@@ -146,6 +177,65 @@ class NimlykoderStorage:
 
         return CodeEntry.from_dict(slot, self._data[slot_str])
 
+    async def update_start(self, slot: int, start: str | None) -> CodeEntry:
+        """Update the scheduled start date for an existing entry.
+
+        Recomputes `activated` the same way `add()` does: pushing the start
+        date out into the future re-locks the code (caller should then pull
+        the PIN off the physical lock — see NimlykoderStorage.get(slot).pin —
+        the same way it would push it back on once pending_start_slots()
+        reports the slot again).
+        """
+        slot_str = str(slot)
+        if slot_str not in self._data:
+            raise HomeAssistantError(f"Slot {slot} not found")
+
+        activated = True
+        if start:
+            start_date = self._parse_date(start, "start")
+            if start_date > date.today():
+                activated = False
+
+        self._data[slot_str]["start"] = start
+        self._data[slot_str]["activated"] = activated
+        self._data[slot_str]["updated"] = datetime.now().isoformat()
+        await self.async_save()
+
+        return CodeEntry.from_dict(slot, self._data[slot_str])
+
+    def pending_start_slots(self, today: date | None = None) -> list[int]:
+        """Get guest code slots whose scheduled start date has arrived.
+
+        These have `activated=False` in storage (their PIN was never sent to
+        the physical lock at creation time) but their `start` date is today
+        or earlier — the caller should push the PIN to the lock now and then
+        call mark_activated(slot).
+        """
+        today = today or date.today()
+        pending = []
+        for slot_str, data in self._data.items():
+            if data.get("activated", True):
+                continue
+            start = data.get("start")
+            if not start:
+                continue
+            try:
+                start_date = datetime.fromisoformat(start).date()
+            except (ValueError, TypeError):
+                _LOGGER.error("Invalid start date for slot %s", slot_str)
+                continue
+            if start_date <= today:
+                pending.append(int(slot_str))
+        return pending
+
+    async def mark_activated(self, slot: int) -> None:
+        """Mark a scheduled-start entry as activated (PIN now on the lock)."""
+        slot_str = str(slot)
+        if slot_str in self._data:
+            self._data[slot_str]["activated"] = True
+            self._data[slot_str]["updated"] = datetime.now().isoformat()
+            await self.async_save()
+
     async def update_pin(self, slot: int, pin: str) -> CodeEntry:
         """Update the stored PIN for an existing entry."""
         slot_str = str(slot)
@@ -163,10 +253,15 @@ class NimlykoderStorage:
 
         Expired guest codes don't count as a match, so a PIN typed on a
         code that's since expired is treated the same as an unknown PIN.
+        Same for a code with a scheduled start that hasn't arrived yet —
+        its PIN was never actually pushed to the physical lock, so it
+        should be treated the same as an unknown PIN too.
         """
         today = today or date.today()
         for slot_str, data in self._data.items():
             if data.get("pin") != pin:
+                continue
+            if not data.get("activated", True):
                 continue
             entry = CodeEntry.from_dict(int(slot_str), data)
             if entry.type == TYPE_GUEST and entry.expiry:

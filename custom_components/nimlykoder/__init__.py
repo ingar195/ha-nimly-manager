@@ -21,6 +21,7 @@ from .const import (
     CONF_MQTT_TOPIC,
     CONF_SLOT_MIN,
     CONF_SLOT_MAX,
+    CONF_GUEST_SLOT_MIN,
     CONF_RESERVED_SLOTS,
     CONF_AUTO_EXPIRE,
     CONF_CLEANUP_TIME,
@@ -29,6 +30,7 @@ from .const import (
     CONF_DOOR_SENSOR,
     DEFAULT_SLOT_MIN,
     DEFAULT_SLOT_MAX,
+    DEFAULT_GUEST_SLOT_MIN,
     DEFAULT_RESERVED_SLOTS,
     DEFAULT_AUTO_EXPIRE,
     DEFAULT_CLEANUP_TIME,
@@ -608,17 +610,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Ensure slot values are integers
     slot_min = options.get(CONF_SLOT_MIN, DEFAULT_SLOT_MIN)
     slot_max = options.get(CONF_SLOT_MAX, DEFAULT_SLOT_MAX)
+    guest_slot_min = options.get(CONF_GUEST_SLOT_MIN, DEFAULT_GUEST_SLOT_MIN)
     if isinstance(slot_min, float):
         slot_min = int(slot_min)
     if isinstance(slot_max, float):
         slot_max = int(slot_max)
-    
+    if isinstance(guest_slot_min, float):
+        guest_slot_min = int(guest_slot_min)
+
     config = {
         CONF_LOCK_ENTITY: lock_entity,
         CONF_MQTT_TOPIC: mqtt_topic,
         CONF_ZHA_ENDPOINT_ID: zha_endpoint_id,
         CONF_SLOT_MIN: slot_min,
         CONF_SLOT_MAX: slot_max,
+        CONF_GUEST_SLOT_MIN: guest_slot_min,
         CONF_RESERVED_SLOTS: options.get(CONF_RESERVED_SLOTS, DEFAULT_RESERVED_SLOTS),
         CONF_AUTO_EXPIRE: options.get(CONF_AUTO_EXPIRE, DEFAULT_AUTO_EXPIRE),
         CONF_CLEANUP_TIME: options.get(CONF_CLEANUP_TIME, DEFAULT_CLEANUP_TIME),
@@ -777,6 +783,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         unsub = await async_setup_cleanup_scheduler(hass, config[CONF_CLEANUP_TIME])
         hass.data[DOMAIN]["cleanup_unsub"] = unsub
 
+    # Also check once at startup for scheduled-start codes whose start date
+    # already arrived while HA was off — don't make them wait for the next
+    # daily cleanup run.
+    hass.async_create_task(_async_activate_pending_codes(hass))
+
     # Listen for options updates
     entry.async_on_unload(entry.add_update_listener(async_update_options))
 
@@ -844,8 +855,9 @@ async def async_setup_cleanup_scheduler(hass: HomeAssistant, cleanup_time: str):
 
         @callback
         def cleanup_expired_codes(now):
-            """Clean up expired guest codes."""
+            """Clean up expired guest codes and activate any that have reached their scheduled start date."""
             hass.async_create_task(_async_cleanup_expired_codes(hass))
+            hass.async_create_task(_async_activate_pending_codes(hass))
 
         # Schedule daily cleanup
         unsub = async_track_time_change(
@@ -915,3 +927,62 @@ async def _async_cleanup_expired_codes(hass: HomeAssistant) -> None:
 
     except Exception as err:
         _LOGGER.error("Error during cleanup: %s", err)
+
+
+async def _async_activate_pending_codes(hass: HomeAssistant) -> None:
+    """Push PINs to the lock for guest codes whose scheduled start date has arrived.
+
+    A guest/temp code created with a future `start` date is stored but its PIN
+    is deliberately never sent to the physical lock (see storage.add() /
+    services.handle_add_code) — so it simply doesn't work at the keypad until
+    now. This is what actually turns it on once that date arrives.
+    """
+    try:
+        data = hass.data.get(DOMAIN)
+        if not data:
+            _LOGGER.warning("Nimlykoder data not available for start-date activation")
+            return
+
+        storage = data["storage"]
+        mqtt_adapter = data["mqtt_adapter"]
+
+        pending_slots = storage.pending_start_slots(date.today())
+
+        if not pending_slots:
+            _LOGGER.debug("No pending scheduled-start codes to activate")
+            return
+
+        _LOGGER.info("Activating %d scheduled-start code(s)", len(pending_slots))
+        activated_count = 0
+
+        for slot in pending_slots:
+            try:
+                entry = storage.get(slot)
+                if entry is None or not entry.pin:
+                    _LOGGER.error(
+                        "Pending scheduled-start slot %s has no stored PIN — skipping",
+                        slot,
+                    )
+                    continue
+
+                await mqtt_adapter.add_code(slot, entry.pin)
+                await storage.mark_activated(slot)
+
+                _LOGGER.info(
+                    "Activated scheduled code '%s' in slot %s (start date reached)",
+                    entry.name,
+                    slot,
+                )
+                activated_count += 1
+            except Exception as err:
+                _LOGGER.error(
+                    "Failed to activate scheduled code in slot %s: %s", slot, err
+                )
+
+        _LOGGER.info(
+            "Scheduled-start activation completed: activated %d of %d codes",
+            activated_count, len(pending_slots)
+        )
+
+    except Exception as err:
+        _LOGGER.error("Error during scheduled-start activation: %s", err)
