@@ -41,6 +41,8 @@ from .const import (
     OPT_AUTO_LOCK_DELAY,
 )
 from .zha_helpers import get_doorlock_cluster, LOCK_SETTINGS
+from .storage import parse_start_datetime, parse_expiry_datetime
+from .scheduler import async_schedule_slot, async_cancel_slot
 
 _LOGGER = logging.getLogger(__name__)
 PANEL_TRANSLATION_KEYS = frozenset({"title", "subtitle", "add_code"})
@@ -139,10 +141,10 @@ async def handle_add(
             return
 
         # Validate expiry format if provided
-        expiry_date = None
+        expiry_dt = None
         if expiry:
             try:
-                expiry_date = datetime.fromisoformat(expiry).date()
+                expiry_dt = parse_expiry_datetime(expiry)
             except ValueError as err:
                 connection.send_error(
                     msg["id"], "invalid_input", f"Invalid expiry date format: {err}"
@@ -150,16 +152,16 @@ async def handle_add(
                 return
 
         # Validate start format if provided, and that it precedes expiry
-        start_date = None
+        start_dt = None
         if start:
             try:
-                start_date = datetime.fromisoformat(start).date()
+                start_dt = parse_start_datetime(start)
             except ValueError as err:
                 connection.send_error(
                     msg["id"], "invalid_input", f"Invalid start date format: {err}"
                 )
                 return
-            if expiry_date and start_date > expiry_date:
+            if expiry_dt and start_dt > expiry_dt:
                 connection.send_error(
                     msg["id"],
                     "invalid_input",
@@ -221,10 +223,10 @@ async def handle_add(
             )
             return
 
-        # A future start date means this code shouldn't work yet — don't push
-        # the PIN to the physical lock at all until that date arrives (the
-        # daily cleanup scheduler in __init__.py activates it then).
-        pending_start = start_date is not None and start_date > datetime.now().date()
+        # A future start date/time means this code shouldn't work yet — don't
+        # push the PIN to the physical lock at all until then (a scheduled
+        # timer activates it, see scheduler.py).
+        pending_start = start_dt is not None and start_dt > datetime.now()
 
         if not pending_start:
             # Send to the lock first (via ZHA or MQTT, depending on configured adapter)
@@ -241,6 +243,7 @@ async def handle_add(
             entry = await storage.add(
                 slot, name, code_type, expiry, pin=pin_code, start=start
             )
+            async_schedule_slot(hass, slot)
             _LOGGER.info(
                 "Added %s code '%s' to slot %s%s",
                 code_type, name, slot, " (pending start)" if pending_start else "",
@@ -298,6 +301,7 @@ async def handle_remove(
 
         # Remove from storage
         await storage.remove(slot)
+        async_cancel_slot(hass, slot)
         _LOGGER.info("Removed code from slot %s", slot)
         connection.send_result(msg["id"], {"success": True})
 
@@ -330,7 +334,7 @@ async def handle_update_expiry(
         # Validate expiry format if provided
         if expiry:
             try:
-                datetime.fromisoformat(expiry)
+                parse_expiry_datetime(expiry)
             except ValueError as err:
                 connection.send_error(
                     msg["id"], "invalid_input", f"Invalid expiry date format: {err}"
@@ -340,6 +344,7 @@ async def handle_update_expiry(
         # Update storage
         try:
             entry = await storage.update_expiry(slot, expiry)
+            async_schedule_slot(hass, slot)
             _LOGGER.info("Updated expiry for slot %s to %s", slot, expiry)
             connection.send_result(msg["id"], {"entry": entry.to_dict()})
         except Exception as err:
@@ -380,7 +385,7 @@ async def handle_update_start(
         # Validate start format if provided
         if start:
             try:
-                datetime.fromisoformat(start)
+                parse_start_datetime(start)
             except ValueError as err:
                 connection.send_error(
                     msg["id"], "invalid_input", f"Invalid start date format: {err}"
@@ -413,6 +418,7 @@ async def handle_update_start(
                     err,
                 )
 
+        async_schedule_slot(hass, slot)
         connection.send_result(msg["id"], {"entry": updated.to_dict()})
 
     except Exception as err:

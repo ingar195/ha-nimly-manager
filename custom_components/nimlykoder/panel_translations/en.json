@@ -77,7 +77,8 @@
   "status": {
     "active": "Active",
     "expired": "Expired",
-    "reserved": "Reserved"
+    "reserved": "Reserved",
+    "pending": "Scheduled"
   },
 
   "type": {
@@ -107,6 +108,8 @@
     "expiry": "Expiry Date",
     "expiry_hint": "Leave empty for no expiry (permanent access)",
     "permanent_no_expiry": "Permanent codes do not have an expiry date.",
+    "start": "Start Date",
+    "start_hint": "Leave empty to activate immediately. If set in the future, the code won't work at the lock until this date.",
     "slot": "Slot",
     "next_available": "Next available",
     "suggested_slot": "Suggested Slot",

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict, dataclass
-from datetime import datetime, date
+from datetime import datetime
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -13,6 +13,29 @@ from homeassistant.exceptions import HomeAssistantError
 from .const import STORAGE_KEY, STORAGE_VERSION, TYPE_PERMANENT, TYPE_GUEST
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def parse_start_datetime(value: str) -> datetime:
+    """Parse a start value (ISO date or datetime) to its effective instant.
+
+    A bare date ("2026-09-20") means "start of that day", matching the
+    field's original date-only behavior for anyone who doesn't need a
+    specific time.
+    """
+    return datetime.fromisoformat(value)
+
+
+def parse_expiry_datetime(value: str) -> datetime:
+    """Parse an expiry value (ISO date or datetime) to its effective instant.
+
+    A bare date ("2026-12-31") means "end of that day" (23:59:59), so a code
+    stays valid through its expiry date, matching the field's original
+    date-only behavior — only an explicit time overrides that.
+    """
+    dt = datetime.fromisoformat(value)
+    if len(value) <= 10:
+        dt = dt.replace(hour=23, minute=59, second=59)
+    return dt
 
 
 @dataclass
@@ -104,12 +127,12 @@ class NimlykoderStorage:
         return CodeEntry.from_dict(slot, self._data[slot_str])
 
     @staticmethod
-    def _parse_date(value: str, field: str) -> date:
-        """Parse an ISO date/datetime string, raising a friendly error."""
+    def _parse_start(value: str) -> datetime:
+        """Parse a start value, raising a friendly error."""
         try:
-            return datetime.fromisoformat(value).date()
+            return parse_start_datetime(value)
         except (ValueError, TypeError) as err:
-            raise HomeAssistantError(f"Invalid {field} date: {value}") from err
+            raise HomeAssistantError(f"Invalid start date/time: {value}") from err
 
     async def add(
         self,
@@ -138,8 +161,7 @@ class NimlykoderStorage:
 
         activated = True
         if start:
-            start_date = self._parse_date(start, "start")
-            if start_date > date.today():
+            if self._parse_start(start) > datetime.now():
                 activated = False
 
         entry_data = {
@@ -192,8 +214,7 @@ class NimlykoderStorage:
 
         activated = True
         if start:
-            start_date = self._parse_date(start, "start")
-            if start_date > date.today():
+            if self._parse_start(start) > datetime.now():
                 activated = False
 
         self._data[slot_str]["start"] = start
@@ -203,15 +224,17 @@ class NimlykoderStorage:
 
         return CodeEntry.from_dict(slot, self._data[slot_str])
 
-    def pending_start_slots(self, today: date | None = None) -> list[int]:
-        """Get guest code slots whose scheduled start date has arrived.
+    def pending_start_slots(self, now: datetime | None = None) -> list[int]:
+        """Get guest code slots whose scheduled start date/time has arrived.
 
         These have `activated=False` in storage (their PIN was never sent to
-        the physical lock at creation time) but their `start` date is today
-        or earlier — the caller should push the PIN to the lock now and then
-        call mark_activated(slot).
+        the physical lock at creation time) but their `start` is now or
+        earlier — the caller should push the PIN to the lock now and then
+        call mark_activated(slot). Used as a startup/catch-up safety net;
+        exact-time activation is normally handled by a scheduled callback
+        (see scheduler.py).
         """
-        today = today or date.today()
+        now = now or datetime.now()
         pending = []
         for slot_str, data in self._data.items():
             if data.get("activated", True):
@@ -220,11 +243,11 @@ class NimlykoderStorage:
             if not start:
                 continue
             try:
-                start_date = datetime.fromisoformat(start).date()
+                start_dt = parse_start_datetime(start)
             except (ValueError, TypeError):
                 _LOGGER.error("Invalid start date for slot %s", slot_str)
                 continue
-            if start_date <= today:
+            if start_dt <= now:
                 pending.append(int(slot_str))
         return pending
 
@@ -248,7 +271,7 @@ class NimlykoderStorage:
 
         return CodeEntry.from_dict(slot, self._data[slot_str])
 
-    def find_by_pin(self, pin: str, today: date | None = None) -> CodeEntry | None:
+    def find_by_pin(self, pin: str, now: datetime | None = None) -> CodeEntry | None:
         """Find a currently-valid entry whose stored PIN matches.
 
         Expired guest codes don't count as a match, so a PIN typed on a
@@ -257,7 +280,7 @@ class NimlykoderStorage:
         its PIN was never actually pushed to the physical lock, so it
         should be treated the same as an unknown PIN too.
         """
-        today = today or date.today()
+        now = now or datetime.now()
         for slot_str, data in self._data.items():
             if data.get("pin") != pin:
                 continue
@@ -266,7 +289,7 @@ class NimlykoderStorage:
             entry = CodeEntry.from_dict(int(slot_str), data)
             if entry.type == TYPE_GUEST and entry.expiry:
                 try:
-                    if datetime.fromisoformat(entry.expiry).date() < today:
+                    if parse_expiry_datetime(entry.expiry) < now:
                         continue
                 except (ValueError, TypeError):
                     pass
@@ -303,14 +326,18 @@ class NimlykoderStorage:
                 return slot
         return None
 
-    def expired_guest_slots(self, today: date) -> list[int]:
-        """Get list of expired guest code slots."""
+    def expired_guest_slots(self, now: datetime | None = None) -> list[int]:
+        """Get list of expired guest code slots.
+
+        Used as a startup/catch-up safety net; exact-time expiry is normally
+        handled by a scheduled callback (see scheduler.py).
+        """
+        now = now or datetime.now()
         expired = []
         for slot_str, data in self._data.items():
             if data["type"] == TYPE_GUEST and data.get("expiry"):
                 try:
-                    expiry_date = datetime.fromisoformat(data["expiry"]).date()
-                    if expiry_date < today:
+                    if parse_expiry_datetime(data["expiry"]) < now:
                         expired.append(int(slot_str))
                 except (ValueError, TypeError):
                     _LOGGER.error("Invalid expiry date for slot %s", slot_str)

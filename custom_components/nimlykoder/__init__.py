@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -53,6 +52,12 @@ from .services import async_setup_services, async_unload_services
 from .websocket import async_register_websocket_handlers
 from .panel import async_register_panel, async_unregister_panel
 from .zha_helpers import get_doorlock_cluster
+from .scheduler import (
+    async_schedule_all,
+    async_cancel_all,
+    async_activate_slot,
+    async_expire_slot,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -783,10 +788,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         unsub = await async_setup_cleanup_scheduler(hass, config[CONF_CLEANUP_TIME])
         hass.data[DOMAIN]["cleanup_unsub"] = unsub
 
-    # Also check once at startup for scheduled-start codes whose start date
-    # already arrived while HA was off — don't make them wait for the next
-    # daily cleanup run.
-    hass.async_create_task(_async_activate_pending_codes(hass))
+    # Schedule exact-time activation/expiry timers for every stored code.
+    # Anything whose moment already passed while HA was off fires immediately.
+    async_schedule_all(hass)
 
     # Listen for options updates
     entry.async_on_unload(entry.add_update_listener(async_update_options))
@@ -822,6 +826,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Cancel cleanup scheduler
         if data.get("cleanup_unsub"):
             data["cleanup_unsub"]()
+
+        # Cancel exact-time start/expiry timers
+        async_cancel_all(hass)
 
     # Unload sensor / binary_sensor platforms
     await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
@@ -876,7 +883,12 @@ async def async_setup_cleanup_scheduler(hass: HomeAssistant, cleanup_time: str):
 
 
 async def _async_cleanup_expired_codes(hass: HomeAssistant) -> None:
-    """Clean up expired guest codes."""
+    """Safety-net sweep for expired guest codes.
+
+    Exact-time expiry is normally handled by a per-slot timer (see
+    scheduler.py), scheduled whenever a code is added/updated and rescheduled
+    at startup. This just catches anything that timer missed.
+    """
     try:
         data = hass.data.get(DOMAIN)
         if not data:
@@ -889,53 +901,26 @@ async def _async_cleanup_expired_codes(hass: HomeAssistant) -> None:
             return
 
         storage = data["storage"]
-        mqtt_adapter = data["mqtt_adapter"]
-
-        today = date.today()
-        expired_slots = storage.expired_guest_slots(today)
+        expired_slots = storage.expired_guest_slots()
 
         if not expired_slots:
             _LOGGER.debug("No expired guest codes to clean up")
             return
 
         _LOGGER.info("Starting cleanup of %d expired guest codes", len(expired_slots))
-        removed_count = 0
-
         for slot in expired_slots:
-            try:
-                entry = storage.get(slot)
-                name = entry.name if entry else f"Slot {slot}"
-                
-                # Remove from the lock
-                await mqtt_adapter.remove_code(slot)
-                # Remove from storage
-                await storage.remove(slot)
-                
-                _LOGGER.info(
-                    "Removed expired code '%s' from slot %s", name, slot
-                )
-                removed_count += 1
-            except Exception as err:
-                _LOGGER.error(
-                    "Failed to remove expired code from slot %s: %s", slot, err
-                )
-
-        _LOGGER.info(
-            "Cleanup completed: removed %d of %d expired codes",
-            removed_count, len(expired_slots)
-        )
+            await async_expire_slot(hass, slot)
 
     except Exception as err:
         _LOGGER.error("Error during cleanup: %s", err)
 
 
 async def _async_activate_pending_codes(hass: HomeAssistant) -> None:
-    """Push PINs to the lock for guest codes whose scheduled start date has arrived.
+    """Safety-net sweep for scheduled-start codes whose start time has arrived.
 
-    A guest/temp code created with a future `start` date is stored but its PIN
-    is deliberately never sent to the physical lock (see storage.add() /
-    services.handle_add_code) — so it simply doesn't work at the keypad until
-    now. This is what actually turns it on once that date arrives.
+    Exact-time activation is normally handled by a per-slot timer (see
+    scheduler.py), scheduled whenever a code is added/updated and rescheduled
+    at startup. This just catches anything that timer missed.
     """
     try:
         data = hass.data.get(DOMAIN)
@@ -944,45 +929,15 @@ async def _async_activate_pending_codes(hass: HomeAssistant) -> None:
             return
 
         storage = data["storage"]
-        mqtt_adapter = data["mqtt_adapter"]
-
-        pending_slots = storage.pending_start_slots(date.today())
+        pending_slots = storage.pending_start_slots()
 
         if not pending_slots:
             _LOGGER.debug("No pending scheduled-start codes to activate")
             return
 
         _LOGGER.info("Activating %d scheduled-start code(s)", len(pending_slots))
-        activated_count = 0
-
         for slot in pending_slots:
-            try:
-                entry = storage.get(slot)
-                if entry is None or not entry.pin:
-                    _LOGGER.error(
-                        "Pending scheduled-start slot %s has no stored PIN — skipping",
-                        slot,
-                    )
-                    continue
-
-                await mqtt_adapter.add_code(slot, entry.pin)
-                await storage.mark_activated(slot)
-
-                _LOGGER.info(
-                    "Activated scheduled code '%s' in slot %s (start date reached)",
-                    entry.name,
-                    slot,
-                )
-                activated_count += 1
-            except Exception as err:
-                _LOGGER.error(
-                    "Failed to activate scheduled code in slot %s: %s", slot, err
-                )
-
-        _LOGGER.info(
-            "Scheduled-start activation completed: activated %d of %d codes",
-            activated_count, len(pending_slots)
-        )
+            await async_activate_slot(hass, slot)
 
     except Exception as err:
         _LOGGER.error("Error during scheduled-start activation: %s", err)

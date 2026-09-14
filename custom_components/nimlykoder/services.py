@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, date
+from datetime import datetime
 
 import voluptuous as vol
 
@@ -29,6 +29,8 @@ from .const import (
     OPT_AUTO_LOCK_ENABLED,
     OPT_AUTO_LOCK_DELAY,
 )
+from .storage import parse_start_datetime, parse_expiry_datetime
+from .scheduler import async_schedule_slot, async_cancel_slot, async_expire_slot
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -131,25 +133,25 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             raise HomeAssistantError("Guest codes must have an expiry date")
 
         # Validate expiry format if provided
-        expiry_date = None
+        expiry_dt = None
         if expiry:
             try:
-                expiry_date = datetime.fromisoformat(expiry).date()
+                expiry_dt = parse_expiry_datetime(expiry)
                 _LOGGER.debug("[handle_add_code] Expiry date validated: %s", expiry)
             except ValueError as err:
                 _LOGGER.error("[handle_add_code] Invalid expiry date format: %s", err)
                 raise HomeAssistantError(f"Invalid expiry date format: {err}") from err
 
         # Validate start format if provided, and that it precedes expiry
-        start_date = None
+        start_dt = None
         if start:
             try:
-                start_date = datetime.fromisoformat(start).date()
+                start_dt = parse_start_datetime(start)
                 _LOGGER.debug("[handle_add_code] Start date validated: %s", start)
             except ValueError as err:
                 _LOGGER.error("[handle_add_code] Invalid start date format: %s", err)
                 raise HomeAssistantError(f"Invalid start date format: {err}") from err
-            if expiry_date and start_date > expiry_date:
+            if expiry_dt and start_dt > expiry_dt:
                 _LOGGER.error("[handle_add_code] Start date is after the expiry date")
                 raise HomeAssistantError("Start date must be on or before the expiry date")
 
@@ -210,11 +212,11 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             _LOGGER.error("[handle_add_code] Slot %d is reserved", slot)
             raise HomeAssistantError(f"Slot {slot} is reserved")
 
-        # A future start date means this code shouldn't work yet — don't push
-        # the PIN to the physical lock at all until that date arrives (the
-        # daily cleanup scheduler in __init__.py activates it then). The
-        # entry still exists in storage so it shows up as "pending" in the UI.
-        pending_start = start_date is not None and start_date > date.today()
+        # A future start date/time means this code shouldn't work yet — don't
+        # push the PIN to the physical lock at all until then (a scheduled
+        # timer activates it, see scheduler.py). The entry still exists in
+        # storage so it shows up as "pending" in the UI.
+        pending_start = start_dt is not None and start_dt > datetime.now()
 
         if pending_start:
             _LOGGER.info(
@@ -242,6 +244,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         # Then store
         try:
             await storage.add(slot, name, code_type, expiry, pin=pin_code, start=start)
+            async_schedule_slot(hass, slot)
             _LOGGER.info(
                 "[handle_add_code] Successfully added %s code '%s' to slot %d%s",
                 code_type,
@@ -301,6 +304,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
         # Remove from storage
         await storage.remove(slot)
+        async_cancel_slot(hass, slot)
         _LOGGER.info("Removed code from slot %s", slot)
 
     async def handle_update_expiry(call: ServiceCall) -> None:
@@ -314,13 +318,14 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         # Validate expiry format if provided
         if expiry:
             try:
-                datetime.fromisoformat(expiry)
+                parse_expiry_datetime(expiry)
             except ValueError as err:
                 raise HomeAssistantError(f"Invalid expiry date format: {err}") from err
 
         # Update storage
         try:
             await storage.update_expiry(slot, expiry)
+            async_schedule_slot(hass, slot)
             _LOGGER.info("Updated expiry for slot %s to %s", slot, expiry)
         except Exception as err:
             raise HomeAssistantError(f"Failed to update expiry: {err}") from err
@@ -341,7 +346,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         # Validate start format if provided
         if start:
             try:
-                datetime.fromisoformat(start)
+                parse_start_datetime(start)
             except ValueError as err:
                 raise HomeAssistantError(f"Invalid start date format: {err}") from err
 
@@ -369,6 +374,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                     slot,
                     err,
                 )
+
+        async_schedule_slot(hass, slot)
 
     async def handle_list_codes(call: ServiceCall) -> None:
         """Handle list_codes service call."""
@@ -469,13 +476,9 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         """Handle cleanup_expired service call - manually trigger expired code cleanup."""
         _LOGGER.info("[handle_cleanup_expired] Manual cleanup triggered")
         
-        data = hass.data[DOMAIN]
-        storage = data["storage"]
-        mqtt_adapter = data["mqtt_adapter"]
-        config = data["config"]
+        storage = hass.data[DOMAIN]["storage"]
 
-        today = date.today()
-        expired_slots = storage.expired_guest_slots(today)
+        expired_slots = storage.expired_guest_slots()
 
         if not expired_slots:
             _LOGGER.info("[handle_cleanup_expired] No expired guest codes to clean up")
@@ -490,25 +493,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
         for slot in expired_slots:
             try:
-                entry = storage.get(slot)
-                name = entry.name if entry else f"Slot {slot}"
-
-                _LOGGER.info(
-                    "[handle_cleanup_expired] Removing expired code '%s' from slot %d",
-                    name,
-                    slot,
-                )
-
-                # Remove from the lock
-                await mqtt_adapter.remove_code(slot)
-                # Remove from storage
-                await storage.remove(slot)
-
-                _LOGGER.info(
-                    "[handle_cleanup_expired] Successfully removed expired code '%s' from slot %d",
-                    name,
-                    slot,
-                )
+                await async_expire_slot(hass, slot)
                 removed_slots.append(slot)
             except Exception as err:
                 _LOGGER.error(
