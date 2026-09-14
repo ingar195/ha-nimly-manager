@@ -18,6 +18,7 @@ from .const import (
     WS_TYPE_ADD,
     WS_TYPE_REMOVE,
     WS_TYPE_UPDATE_EXPIRY,
+    WS_TYPE_UPDATE_START,
     WS_TYPE_UPDATE_NAME,
     WS_TYPE_UPDATE_PIN,
     WS_TYPE_SUGGEST_SLOTS,
@@ -33,11 +34,15 @@ from .const import (
     CONF_CLEANUP_TIME,
     CONF_LOCK_ENTITY,
     CONF_ZHA_ENDPOINT_ID,
+    CONF_GUEST_SLOT_MIN,
     DEFAULT_ZHA_ENDPOINT_ID,
+    DEFAULT_GUEST_SLOT_MIN,
     OPT_AUTO_LOCK_ENABLED,
     OPT_AUTO_LOCK_DELAY,
 )
 from .zha_helpers import get_doorlock_cluster, LOCK_SETTINGS
+from .storage import parse_start_datetime, parse_expiry_datetime
+from .scheduler import async_schedule_slot, async_cancel_slot
 
 _LOGGER = logging.getLogger(__name__)
 PANEL_TRANSLATION_KEYS = frozenset({"title", "subtitle", "add_code"})
@@ -50,6 +55,7 @@ def async_register_websocket_handlers(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, handle_add)
     websocket_api.async_register_command(hass, handle_remove)
     websocket_api.async_register_command(hass, handle_update_expiry)
+    websocket_api.async_register_command(hass, handle_update_start)
     websocket_api.async_register_command(hass, handle_update_name)
     websocket_api.async_register_command(hass, handle_update_pin)
     websocket_api.async_register_command(hass, handle_suggest_slots)
@@ -94,6 +100,7 @@ async def handle_list(
         vol.Required("pin_code"): str,
         vol.Required("code_type"): vol.In([TYPE_PERMANENT, TYPE_GUEST]),
         vol.Optional("expiry"): str,
+        vol.Optional("start"): str,
         vol.Optional("slot"): int,
         vol.Optional("force", default=False): bool,
     }
@@ -115,6 +122,7 @@ async def handle_add(
         pin_code = msg["pin_code"]
         code_type = msg["code_type"]
         expiry = msg.get("expiry")
+        start = msg.get("start")
         preferred_slot = msg.get("slot")
         force = msg.get("force", False)
 
@@ -133,12 +141,31 @@ async def handle_add(
             return
 
         # Validate expiry format if provided
+        expiry_dt = None
         if expiry:
             try:
-                datetime.fromisoformat(expiry)
+                expiry_dt = parse_expiry_datetime(expiry)
             except ValueError as err:
                 connection.send_error(
                     msg["id"], "invalid_input", f"Invalid expiry date format: {err}"
+                )
+                return
+
+        # Validate start format if provided, and that it precedes expiry
+        start_dt = None
+        if start:
+            try:
+                start_dt = parse_start_datetime(start)
+            except ValueError as err:
+                connection.send_error(
+                    msg["id"], "invalid_input", f"Invalid start date format: {err}"
+                )
+                return
+            if expiry_dt and start_dt > expiry_dt:
+                connection.send_error(
+                    msg["id"],
+                    "invalid_input",
+                    "Start date must be on or before the expiry date",
                 )
                 return
 
@@ -170,9 +197,16 @@ async def handle_add(
                     )
                     return
         else:
-            # Auto-select slot
+            # Auto-select slot. Guest/temp codes get their own range starting
+            # at guest_slot_min (default 80) so they don't compete with
+            # permanent codes for the low slot numbers.
+            auto_slot_min = (
+                config.get(CONF_GUEST_SLOT_MIN, DEFAULT_GUEST_SLOT_MIN)
+                if code_type == TYPE_GUEST
+                else config["slot_min"]
+            )
             slot = storage.find_first_free_slot(
-                config["slot_min"],
+                auto_slot_min,
                 config["slot_max"],
                 config["reserved_slots"],
             )
@@ -189,26 +223,39 @@ async def handle_add(
             )
             return
 
-        # Send to the lock first (via ZHA or MQTT, depending on configured adapter)
-        try:
-            await mqtt_adapter.add_code(slot, pin_code)
-        except Exception as err:
-            connection.send_error(
-                msg["id"], "adapter_error", f"Failed to add code to lock: {err}"
-            )
-            return
+        # A future start date/time means this code shouldn't work yet — don't
+        # push the PIN to the physical lock at all until then (a scheduled
+        # timer activates it, see scheduler.py).
+        pending_start = start_dt is not None and start_dt > datetime.now()
+
+        if not pending_start:
+            # Send to the lock first (via ZHA or MQTT, depending on configured adapter)
+            try:
+                await mqtt_adapter.add_code(slot, pin_code)
+            except Exception as err:
+                connection.send_error(
+                    msg["id"], "adapter_error", f"Failed to add code to lock: {err}"
+                )
+                return
 
         # Then store
         try:
-            entry = await storage.add(slot, name, code_type, expiry, pin=pin_code)
-            _LOGGER.info("Added %s code '%s' to slot %s", code_type, name, slot)
+            entry = await storage.add(
+                slot, name, code_type, expiry, pin=pin_code, start=start
+            )
+            async_schedule_slot(hass, slot)
+            _LOGGER.info(
+                "Added %s code '%s' to slot %s%s",
+                code_type, name, slot, " (pending start)" if pending_start else "",
+            )
             connection.send_result(msg["id"], {"entry": entry.to_dict()})
         except Exception as err:
-            # Try to clean up lock if storage fails
-            try:
-                await mqtt_adapter.remove_code(slot)
-            except Exception:
-                pass
+            # Try to clean up lock if storage fails (only if we actually pushed to it)
+            if not pending_start:
+                try:
+                    await mqtt_adapter.remove_code(slot)
+                except Exception:
+                    pass
             connection.send_error(msg["id"], "storage_error", str(err))
             return
 
@@ -254,6 +301,7 @@ async def handle_remove(
 
         # Remove from storage
         await storage.remove(slot)
+        async_cancel_slot(hass, slot)
         _LOGGER.info("Removed code from slot %s", slot)
         connection.send_result(msg["id"], {"success": True})
 
@@ -286,7 +334,7 @@ async def handle_update_expiry(
         # Validate expiry format if provided
         if expiry:
             try:
-                datetime.fromisoformat(expiry)
+                parse_expiry_datetime(expiry)
             except ValueError as err:
                 connection.send_error(
                     msg["id"], "invalid_input", f"Invalid expiry date format: {err}"
@@ -296,6 +344,7 @@ async def handle_update_expiry(
         # Update storage
         try:
             entry = await storage.update_expiry(slot, expiry)
+            async_schedule_slot(hass, slot)
             _LOGGER.info("Updated expiry for slot %s to %s", slot, expiry)
             connection.send_result(msg["id"], {"entry": entry.to_dict()})
         except Exception as err:
@@ -303,6 +352,77 @@ async def handle_update_expiry(
 
     except Exception as err:
         _LOGGER.error("Error updating expiry: %s", err)
+        connection.send_error(msg["id"], "update_failed", str(err))
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_TYPE_UPDATE_START,
+        vol.Required("slot"): int,
+        vol.Optional("start"): str,
+    }
+)
+@websocket_api.async_response
+async def handle_update_start(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Handle update_start command."""
+    try:
+        data = hass.data[DOMAIN]
+        storage = data["storage"]
+        mqtt_adapter = data["mqtt_adapter"]
+
+        slot = msg["slot"]
+        start = msg.get("start")
+
+        entry = storage.get(slot)
+        if entry is None:
+            connection.send_error(msg["id"], "not_found", f"Slot {slot} not found")
+            return
+
+        # Validate start format if provided
+        if start:
+            try:
+                parse_start_datetime(start)
+            except ValueError as err:
+                connection.send_error(
+                    msg["id"], "invalid_input", f"Invalid start date format: {err}"
+                )
+                return
+
+        was_activated = entry.activated
+
+        try:
+            updated = await storage.update_start(slot, start)
+            _LOGGER.info("Updated start date for slot %s to %s", slot, start)
+        except Exception as err:
+            connection.send_error(msg["id"], "update_failed", str(err))
+            return
+
+        # Pushing the start date into the future re-locks a code that was
+        # already on the lock — pull its PIN off so it stops working
+        # immediately, matching what a fresh pending code would do.
+        if was_activated and not updated.activated:
+            try:
+                await mqtt_adapter.remove_code(slot)
+                _LOGGER.info(
+                    "Removed PIN from lock for slot %s — start date pushed to the future",
+                    slot,
+                )
+            except Exception as err:
+                _LOGGER.error(
+                    "Failed to remove PIN from lock for slot %s after rescheduling: %s",
+                    slot,
+                    err,
+                )
+
+        async_schedule_slot(hass, slot)
+        connection.send_result(msg["id"], {"entry": updated.to_dict()})
+
+    except Exception as err:
+        _LOGGER.error("Error updating start date: %s", err)
         connection.send_error(msg["id"], "update_failed", str(err))
 
 

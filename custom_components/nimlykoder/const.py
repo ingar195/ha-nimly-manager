@@ -6,6 +6,10 @@ DOMAIN = "nimlykoder"
 CONF_LOCK_ENTITY = "lock_entity"
 CONF_SLOT_MIN = "slot_min"
 CONF_SLOT_MAX = "slot_max"
+# Lowest slot auto-assigned to a temporary/guest code. Keeps guest codes in
+# their own range above the permanent codes' auto-assign range (slot_min..)
+# so the two types don't compete for the same low slot numbers.
+CONF_GUEST_SLOT_MIN = "guest_slot_min"
 CONF_RESERVED_SLOTS = "reserved_slots"
 CONF_AUTO_EXPIRE = "auto_expire"
 CONF_CLEANUP_TIME = "cleanup_time"
@@ -26,6 +30,7 @@ CONF_DOOR_SENSOR = "door_sensor"
 # so a real code living in slot 0 would make activity-log attribution ambiguous.
 DEFAULT_SLOT_MIN = 1
 DEFAULT_SLOT_MAX = 99
+DEFAULT_GUEST_SLOT_MIN = 80
 DEFAULT_RESERVED_SLOTS = [1, 2, 3]
 DEFAULT_AUTO_EXPIRE = True
 DEFAULT_CLEANUP_TIME = "03:00:00"
@@ -60,6 +65,7 @@ SERVICE_SET_AUTO_LOCK = "set_auto_lock"
 SERVICE_ADD_CODE = "add_code"
 SERVICE_REMOVE_CODE = "remove_code"
 SERVICE_UPDATE_EXPIRY = "update_expiry"
+SERVICE_UPDATE_START = "update_start"
 SERVICE_UPDATE_NAME = "update_name"
 SERVICE_UPDATE_PIN = "update_pin"
 SERVICE_LIST_CODES = "list_codes"
@@ -70,6 +76,7 @@ WS_TYPE_LIST = "nimlykoder/list"
 WS_TYPE_ADD = "nimlykoder/add"
 WS_TYPE_REMOVE = "nimlykoder/remove"
 WS_TYPE_UPDATE_EXPIRY = "nimlykoder/update_expiry"
+WS_TYPE_UPDATE_START = "nimlykoder/update_start"
 WS_TYPE_UPDATE_NAME = "nimlykoder/update_name"
 WS_TYPE_UPDATE_PIN = "nimlykoder/update_pin"
 WS_TYPE_SUGGEST_SLOTS = "nimlykoder/suggest_slots"

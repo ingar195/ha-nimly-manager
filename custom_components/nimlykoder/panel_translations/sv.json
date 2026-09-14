@@ -20,7 +20,8 @@
   "status": {
     "active": "Aktiv",
     "expired": "Utgången",
-    "reserved": "Reserverad"
+    "reserved": "Reserverad",
+    "pending": "Schemalagd"
   },
   "type": {
     "permanent": "Permanent",
@@ -48,6 +49,8 @@
     "expiry": "Utgångsdatum",
     "expiry_hint": "Lämna tomt för ingen utgång (permanent åtkomst)",
     "permanent_no_expiry": "Permanenta koder har inget utgångsdatum.",
+    "start": "Startdatum",
+    "start_hint": "Lämna tomt för att aktivera direkt. Om det sätts i framtiden fungerar koden inte i låset förrän detta datum.",
     "slot": "Plats",
     "next_available": "Nästa lediga",
     "suggested_slot": "Föreslagen plats",
@@ -75,6 +78,8 @@
   "retry": "Försök igen",
   "expires": "Utgår",
   "expired_on": "Utgick",
+  "starts": "Börjar",
+  "started": "Startade",
   "slot_label": "Plats",
   "expired_info": {
     "title": "Utgångna koder",

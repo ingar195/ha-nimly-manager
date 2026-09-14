@@ -26,7 +26,7 @@ async def async_register_panel(hass: HomeAssistant) -> None:
         )
 
         # Register the custom panel — version bump forces browser cache invalidation
-        _PANEL_VERSION = "20260816-2"
+        _PANEL_VERSION = "20260914-3"
         await panel_custom.async_register_panel(
             hass,
             webcomponent_name="nimlykoder-panel",

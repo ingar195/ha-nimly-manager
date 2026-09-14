@@ -101,6 +101,7 @@ class NimlykoderPanel extends LitElement {
                 active: "Active",
                 expired: "Expired",
                 reserved: "Reserved",
+                pending: "Scheduled",
             },
             type: {
                 permanent: "Permanent",
@@ -128,6 +129,8 @@ class NimlykoderPanel extends LitElement {
                 expiry: "Expiry Date",
                 expiry_hint: "Leave empty for no expiry (permanent access)",
                 permanent_no_expiry: "Permanent codes do not have an expiry date.",
+                start: "Start Date",
+                start_hint: "Leave empty to activate immediately. If set in the future, the code won't work at the lock until this date.",
                 slot: "Slot",
                 next_available: "Next available",
                 cancel: "Cancel",
@@ -152,6 +155,8 @@ class NimlykoderPanel extends LitElement {
             retry: "Retry",
             expires: "Expires",
             expired_on: "Expired",
+            starts: "Starts",
+            started: "Started",
             slot_label: "Slot",
             expired_info: {
                 title: "Expired Codes",
@@ -1326,23 +1331,39 @@ class NimlykoderPanel extends LitElement {
 
     getAvatarClass(code) {
         if (this.isExpired(code)) return "avatar-expired";
+        if (code.activated === false) return "avatar-guest";
         return code.type === "permanent" ? "avatar-permanent" : "avatar-guest";
     }
 
     getBadgeClass(code) {
         if (this.isExpired(code)) return "badge-expired";
+        if (code.activated === false) return "badge-guest";
         return code.type === "permanent" ? "badge-permanent" : "badge-guest";
     }
 
     getBadgeText(code) {
         if (this.isExpired(code)) return this.t("status.expired");
+        if (code.activated === false) return this.t("status.pending");
         return code.type === "permanent" ? this.t("type.permanent") : this.t("type.guest");
     }
 
     formatDate(dateStr) {
         if (!dateStr) return "—";
         const date = new Date(dateStr);
-        return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+        const hasTime = dateStr.includes("T");
+        return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })
+            + (hasTime ? " " + date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) : "");
+    }
+
+    _splitDateTime(value) {
+        if (!value) return { date: "", time: "" };
+        const [datePart, timePart] = value.split("T");
+        return { date: datePart || "", time: timePart ? timePart.slice(0, 5) : "" };
+    }
+
+    _combineDateTime(dateVal, timeVal) {
+        if (!dateVal) return "";
+        return timeVal ? `${dateVal}T${timeVal}` : dateVal;
     }
 
     render() {
@@ -1634,6 +1655,14 @@ class NimlykoderPanel extends LitElement {
                                     <path d="M12,20A8,8 0 0,0 20,12A8,8 0 0,0 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22C6.47,22 2,17.5 2,12A10,10 0 0,1 12,2M12.5,7V12.25L17,14.92L16.25,16.15L11,13V7H12.5Z"/>
                                 </svg>
                                 ${this.isExpired(code) ? this.t("expired_on") : this.t("expires")} ${this.formatDate(code.expiry)}
+                            </span>
+                        ` : ""}
+                        ${code.start ? html`
+                            <span class="person-detail">
+                                <svg viewBox="0 0 24 24" fill="currentColor">
+                                    <path d="M12,20A8,8 0 0,0 20,12A8,8 0 0,0 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22C6.47,22 2,17.5 2,12A10,10 0 0,1 12,2M12.5,7V12.25L17,14.92L16.25,16.15L11,13V7H12.5Z"/>
+                                </svg>
+                                ${code.activated === false ? this.t("starts") : this.t("started")} ${this.formatDate(code.start)}
                             </span>
                         ` : ""}
                     </div>
@@ -2011,7 +2040,18 @@ class NimlykoderPanel extends LitElement {
                         </div>
                         <div class="form-group" id="expiry-group" style="display: none;">
                             <label for="add-expiry">${this.t("dialog.expiry")}</label>
-                            <input type="date" id="add-expiry" />
+                            <div class="form-row">
+                                <input type="date" id="add-expiry" />
+                                <input type="time" id="add-expiry-time" />
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="add-start">${this.t("dialog.start")}</label>
+                            <div class="form-row">
+                                <input type="date" id="add-start" />
+                                <input type="time" id="add-start-time" />
+                            </div>
+                            <small>${this.t("dialog.start_hint")}</small>
                         </div>
                     </div>
                     <div class="dialog-actions">
@@ -2046,12 +2086,23 @@ class NimlykoderPanel extends LitElement {
                         ${isGuest ? html`
                             <div class="form-group">
                                 <label for="edit-expiry">${this.t("dialog.expiry")}</label>
-                                <input type="date" id="edit-expiry" .value=${this.editingCode.expiry || ""} />
+                                <div class="form-row">
+                                    <input type="date" id="edit-expiry" .value=${this._splitDateTime(this.editingCode.expiry).date} />
+                                    <input type="time" id="edit-expiry-time" .value=${this._splitDateTime(this.editingCode.expiry).time} />
+                                </div>
                                 <small>${this.t("dialog.expiry_hint")}</small>
                             </div>
                         ` : html`
                             <p style="color: var(--text-secondary); margin-bottom: 16px;">${this.t("dialog.permanent_no_expiry")}</p>
                         `}
+                        <div class="form-group">
+                            <label for="edit-start">${this.t("dialog.start")}</label>
+                            <div class="form-row">
+                                <input type="date" id="edit-start" .value=${this._splitDateTime(this.editingCode.start).date} />
+                                <input type="time" id="edit-start-time" .value=${this._splitDateTime(this.editingCode.start).time} />
+                            </div>
+                            <small>${this.t("dialog.start_hint")}</small>
+                        </div>
                         <div class="form-group" style="border-top: 1px solid var(--divider); padding-top: 16px; margin-top: 16px;">
                             <label for="edit-pin">${this.t("dialog.change_pin")}</label>
                             <input type="text" id="edit-pin" placeholder="${this.t("dialog.pin_placeholder")}" pattern="[0-9]{4,6}" maxlength="6" inputmode="numeric" @input=${() => this.editFormError = null} />
@@ -2151,7 +2202,14 @@ class NimlykoderPanel extends LitElement {
         const name = this.shadowRoot.getElementById("add-name").value;
         const pinCode = this.shadowRoot.getElementById("add-pin").value;
         const codeType = this.shadowRoot.getElementById("add-type").value;
-        const expiry = this.shadowRoot.getElementById("add-expiry").value;
+        const expiry = this._combineDateTime(
+            this.shadowRoot.getElementById("add-expiry").value,
+            this.shadowRoot.getElementById("add-expiry-time").value,
+        );
+        const start = this._combineDateTime(
+            this.shadowRoot.getElementById("add-start").value,
+            this.shadowRoot.getElementById("add-start-time").value,
+        );
         const slot = this.shadowRoot.getElementById("add-slot").value;
 
         if (!name || !pinCode) {
@@ -2161,6 +2219,7 @@ class NimlykoderPanel extends LitElement {
 
         const data = { name, pin_code: pinCode, code_type: codeType };
         if (expiry) data.expiry = expiry;
+        if (start) data.start = start;
         if (slot) data.slot = parseInt(slot);
 
         try {
@@ -2175,7 +2234,13 @@ class NimlykoderPanel extends LitElement {
     async _handleEditSubmit() {
         const name = this.shadowRoot.getElementById("edit-name").value;
         const expiryEl = this.shadowRoot.getElementById("edit-expiry");
-        const expiry = expiryEl ? expiryEl.value : null;
+        const expiry = expiryEl
+            ? this._combineDateTime(expiryEl.value, this.shadowRoot.getElementById("edit-expiry-time").value)
+            : null;
+        const start = this._combineDateTime(
+            this.shadowRoot.getElementById("edit-start").value,
+            this.shadowRoot.getElementById("edit-start-time").value,
+        );
         const newPin = this.shadowRoot.getElementById("edit-pin").value.trim();
 
         if (!name || !name.trim()) { this.editFormError = "name_required"; return; }
@@ -2190,6 +2255,10 @@ class NimlykoderPanel extends LitElement {
                 if (expiry !== currentExpiry) {
                     await this.hass.callWS({ type: "nimlykoder/update_expiry", slot: this.editingCode.slot, expiry: expiry || null });
                 }
+            }
+            const currentStart = this.editingCode.start || "";
+            if (start !== currentStart) {
+                await this.hass.callWS({ type: "nimlykoder/update_start", slot: this.editingCode.slot, start: start || null });
             }
             if (newPin) {
                 this.pendingPinUpdate = { slot: this.editingCode.slot, name: name.trim(), pin_code: newPin };

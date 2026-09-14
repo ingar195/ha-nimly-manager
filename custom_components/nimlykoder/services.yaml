@@ -29,10 +29,23 @@ add_code:
             - guest
     expiry:
       name: Expiry Date
-      description: Expiry date (ISO format YYYY-MM-DD, required for guest codes)
-      example: "2026-12-31"
+      description: >-
+        Expiry date/time (ISO format YYYY-MM-DD, required for guest codes).
+        Add a time (YYYY-MM-DDTHH:MM) for an exact expiry moment — otherwise
+        the code stays valid through the end of the given day.
+      example: "2026-12-31T09:00"
       selector:
-        date:
+        datetime:
+    start:
+      name: Start Date
+      description: >-
+        Scheduled start date/time (ISO format YYYY-MM-DD, or YYYY-MM-DDTHH:MM
+        for an exact time). If set in the future, the code is stored but its
+        PIN is not sent to the lock until this moment arrives — it simply
+        won't work at the keypad until then.
+      example: "2026-09-01T15:00"
+      selector:
+        datetime:
     slot:
       name: Slot Number
       description: Preferred slot number (optional, auto-selected if not provided)
@@ -80,10 +93,38 @@ update_expiry:
           mode: box
     expiry:
       name: Expiry Date
-      description: New expiry date (ISO format YYYY-MM-DD, or leave empty to remove)
-      example: "2027-01-31"
+      description: >-
+        New expiry date/time (ISO format YYYY-MM-DD or YYYY-MM-DDTHH:MM,
+        or leave empty to remove)
+      example: "2027-01-31T09:00"
       selector:
-        date:
+        datetime:
+
+update_start:
+  name: Update Start Date
+  description: >-
+    Update the scheduled start date/time of a code. Pushing it into the
+    future pulls the PIN off the lock immediately; reaching now or the past
+    activates it right away.
+  fields:
+    slot:
+      name: Slot Number
+      description: Slot number to update
+      required: true
+      example: 10
+      selector:
+        number:
+          min: 0
+          max: 99
+          mode: box
+    start:
+      name: Start Date
+      description: >-
+        New start date/time (ISO format YYYY-MM-DD or YYYY-MM-DDTHH:MM,
+        or leave empty to remove)
+      example: "2026-09-15T15:00"
+      selector:
+        datetime:
 
 update_name:
   name: Update Name

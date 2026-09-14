@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -21,6 +20,7 @@ from .const import (
     CONF_MQTT_TOPIC,
     CONF_SLOT_MIN,
     CONF_SLOT_MAX,
+    CONF_GUEST_SLOT_MIN,
     CONF_RESERVED_SLOTS,
     CONF_AUTO_EXPIRE,
     CONF_CLEANUP_TIME,
@@ -29,6 +29,7 @@ from .const import (
     CONF_DOOR_SENSOR,
     DEFAULT_SLOT_MIN,
     DEFAULT_SLOT_MAX,
+    DEFAULT_GUEST_SLOT_MIN,
     DEFAULT_RESERVED_SLOTS,
     DEFAULT_AUTO_EXPIRE,
     DEFAULT_CLEANUP_TIME,
@@ -51,6 +52,12 @@ from .services import async_setup_services, async_unload_services
 from .websocket import async_register_websocket_handlers
 from .panel import async_register_panel, async_unregister_panel
 from .zha_helpers import get_doorlock_cluster
+from .scheduler import (
+    async_schedule_all,
+    async_cancel_all,
+    async_activate_slot,
+    async_expire_slot,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -608,17 +615,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Ensure slot values are integers
     slot_min = options.get(CONF_SLOT_MIN, DEFAULT_SLOT_MIN)
     slot_max = options.get(CONF_SLOT_MAX, DEFAULT_SLOT_MAX)
+    guest_slot_min = options.get(CONF_GUEST_SLOT_MIN, DEFAULT_GUEST_SLOT_MIN)
     if isinstance(slot_min, float):
         slot_min = int(slot_min)
     if isinstance(slot_max, float):
         slot_max = int(slot_max)
-    
+    if isinstance(guest_slot_min, float):
+        guest_slot_min = int(guest_slot_min)
+
     config = {
         CONF_LOCK_ENTITY: lock_entity,
         CONF_MQTT_TOPIC: mqtt_topic,
         CONF_ZHA_ENDPOINT_ID: zha_endpoint_id,
         CONF_SLOT_MIN: slot_min,
         CONF_SLOT_MAX: slot_max,
+        CONF_GUEST_SLOT_MIN: guest_slot_min,
         CONF_RESERVED_SLOTS: options.get(CONF_RESERVED_SLOTS, DEFAULT_RESERVED_SLOTS),
         CONF_AUTO_EXPIRE: options.get(CONF_AUTO_EXPIRE, DEFAULT_AUTO_EXPIRE),
         CONF_CLEANUP_TIME: options.get(CONF_CLEANUP_TIME, DEFAULT_CLEANUP_TIME),
@@ -777,6 +788,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         unsub = await async_setup_cleanup_scheduler(hass, config[CONF_CLEANUP_TIME])
         hass.data[DOMAIN]["cleanup_unsub"] = unsub
 
+    # Schedule exact-time activation/expiry timers for every stored code.
+    # Anything whose moment already passed while HA was off fires immediately.
+    async_schedule_all(hass)
+
     # Listen for options updates
     entry.async_on_unload(entry.add_update_listener(async_update_options))
 
@@ -812,6 +827,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if data.get("cleanup_unsub"):
             data["cleanup_unsub"]()
 
+        # Cancel exact-time start/expiry timers
+        async_cancel_all(hass)
+
     # Unload sensor / binary_sensor platforms
     await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
@@ -844,8 +862,9 @@ async def async_setup_cleanup_scheduler(hass: HomeAssistant, cleanup_time: str):
 
         @callback
         def cleanup_expired_codes(now):
-            """Clean up expired guest codes."""
+            """Clean up expired guest codes and activate any that have reached their scheduled start date."""
             hass.async_create_task(_async_cleanup_expired_codes(hass))
+            hass.async_create_task(_async_activate_pending_codes(hass))
 
         # Schedule daily cleanup
         unsub = async_track_time_change(
@@ -864,7 +883,12 @@ async def async_setup_cleanup_scheduler(hass: HomeAssistant, cleanup_time: str):
 
 
 async def _async_cleanup_expired_codes(hass: HomeAssistant) -> None:
-    """Clean up expired guest codes."""
+    """Safety-net sweep for expired guest codes.
+
+    Exact-time expiry is normally handled by a per-slot timer (see
+    scheduler.py), scheduled whenever a code is added/updated and rescheduled
+    at startup. This just catches anything that timer missed.
+    """
     try:
         data = hass.data.get(DOMAIN)
         if not data:
@@ -877,41 +901,43 @@ async def _async_cleanup_expired_codes(hass: HomeAssistant) -> None:
             return
 
         storage = data["storage"]
-        mqtt_adapter = data["mqtt_adapter"]
-
-        today = date.today()
-        expired_slots = storage.expired_guest_slots(today)
+        expired_slots = storage.expired_guest_slots()
 
         if not expired_slots:
             _LOGGER.debug("No expired guest codes to clean up")
             return
 
         _LOGGER.info("Starting cleanup of %d expired guest codes", len(expired_slots))
-        removed_count = 0
-
         for slot in expired_slots:
-            try:
-                entry = storage.get(slot)
-                name = entry.name if entry else f"Slot {slot}"
-                
-                # Remove from the lock
-                await mqtt_adapter.remove_code(slot)
-                # Remove from storage
-                await storage.remove(slot)
-                
-                _LOGGER.info(
-                    "Removed expired code '%s' from slot %s", name, slot
-                )
-                removed_count += 1
-            except Exception as err:
-                _LOGGER.error(
-                    "Failed to remove expired code from slot %s: %s", slot, err
-                )
-
-        _LOGGER.info(
-            "Cleanup completed: removed %d of %d expired codes",
-            removed_count, len(expired_slots)
-        )
+            await async_expire_slot(hass, slot)
 
     except Exception as err:
         _LOGGER.error("Error during cleanup: %s", err)
+
+
+async def _async_activate_pending_codes(hass: HomeAssistant) -> None:
+    """Safety-net sweep for scheduled-start codes whose start time has arrived.
+
+    Exact-time activation is normally handled by a per-slot timer (see
+    scheduler.py), scheduled whenever a code is added/updated and rescheduled
+    at startup. This just catches anything that timer missed.
+    """
+    try:
+        data = hass.data.get(DOMAIN)
+        if not data:
+            _LOGGER.warning("Nimlykoder data not available for start-date activation")
+            return
+
+        storage = data["storage"]
+        pending_slots = storage.pending_start_slots()
+
+        if not pending_slots:
+            _LOGGER.debug("No pending scheduled-start codes to activate")
+            return
+
+        _LOGGER.info("Activating %d scheduled-start code(s)", len(pending_slots))
+        for slot in pending_slots:
+            await async_activate_slot(hass, slot)
+
+    except Exception as err:
+        _LOGGER.error("Error during scheduled-start activation: %s", err)
