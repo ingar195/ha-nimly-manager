@@ -78,6 +78,8 @@
   "retry": "Försök igen",
   "expires": "Utgår",
   "expired_on": "Utgick",
+  "starts": "Börjar",
+  "started": "Startade",
   "slot_label": "Plats",
   "expired_info": {
     "title": "Utgångna koder",

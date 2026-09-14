@@ -243,7 +243,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
         # Then store
         try:
-            await storage.add(slot, name, code_type, expiry, pin=pin_code, start=start)
+            entry = await storage.add(slot, name, code_type, expiry, pin=pin_code, start=start)
             async_schedule_slot(hass, slot)
             _LOGGER.info(
                 "[handle_add_code] Successfully added %s code '%s' to slot %d%s",
@@ -252,6 +252,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                 slot,
                 " (pending start)" if pending_start else "",
             )
+            return {"entry": entry.to_dict()}
         except Exception as err:
             _LOGGER.error(
                 "[handle_add_code] Storage failed for slot %d, rolling back lock adapter: %s",

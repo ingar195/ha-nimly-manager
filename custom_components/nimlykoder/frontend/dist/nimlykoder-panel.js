@@ -155,6 +155,8 @@ class NimlykoderPanel extends LitElement {
             retry: "Retry",
             expires: "Expires",
             expired_on: "Expired",
+            starts: "Starts",
+            started: "Started",
             slot_label: "Slot",
             expired_info: {
                 title: "Expired Codes",
@@ -1655,12 +1657,12 @@ class NimlykoderPanel extends LitElement {
                                 ${this.isExpired(code) ? this.t("expired_on") : this.t("expires")} ${this.formatDate(code.expiry)}
                             </span>
                         ` : ""}
-                        ${code.activated === false && code.start ? html`
+                        ${code.start ? html`
                             <span class="person-detail">
                                 <svg viewBox="0 0 24 24" fill="currentColor">
                                     <path d="M12,20A8,8 0 0,0 20,12A8,8 0 0,0 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22C6.47,22 2,17.5 2,12A10,10 0 0,1 12,2M12.5,7V12.25L17,14.92L16.25,16.15L11,13V7H12.5Z"/>
                                 </svg>
-                                ${this.t("dialog.start")}: ${this.formatDate(code.start)}
+                                ${code.activated === false ? this.t("starts") : this.t("started")} ${this.formatDate(code.start)}
                             </span>
                         ` : ""}
                     </div>

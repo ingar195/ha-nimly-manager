@@ -169,6 +169,8 @@
   "retry": "Retry",
   "expires": "Expires",
   "expired_on": "Expired",
+  "starts": "Starts",
+  "started": "Started",
   "slot_label": "Slot",
 
   "expired_info": {
