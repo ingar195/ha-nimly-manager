@@ -31,7 +31,7 @@
       "invalid_slot_range": "Minsta plats måste vara mindre än högsta plats"
     },
     "abort": {
-      "already_configured": "Nimlykoder är redan konfigurerad"
+      "already_configured": "Det här låset är redan konfigurerat"
     }
   },
   "options": {

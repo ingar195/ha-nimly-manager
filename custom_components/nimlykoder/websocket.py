@@ -1,8 +1,15 @@
-"""WebSocket API for Nimlykoder integration."""
+"""WebSocket API for Nimlykoder integration.
+
+User commands (list/add/remove/update_*) act on the one shared user list and
+take an optional `locks` list. Lock commands (config, activity, auto-lock,
+lock settings) take an optional `entry_id`; omitted means the original lock.
+"""
 from __future__ import annotations
 
+import functools
+import json
 import logging
-from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import voluptuous as vol
@@ -21,8 +28,11 @@ from .const import (
     WS_TYPE_UPDATE_START,
     WS_TYPE_UPDATE_NAME,
     WS_TYPE_UPDATE_PIN,
+    WS_TYPE_UPDATE_LOCKS,
     WS_TYPE_SUGGEST_SLOTS,
     WS_TYPE_CONFIG,
+    WS_TYPE_ENTRIES,
+    WS_TYPE_RESYNC,
     WS_TYPE_TRANSLATIONS,
     WS_TYPE_SET_AUTO_LOCK,
     WS_TYPE_ACTIVITY,
@@ -34,63 +44,95 @@ from .const import (
     CONF_CLEANUP_TIME,
     CONF_LOCK_ENTITY,
     CONF_ZHA_ENDPOINT_ID,
-    CONF_GUEST_SLOT_MIN,
     DEFAULT_ZHA_ENDPOINT_ID,
-    DEFAULT_GUEST_SLOT_MIN,
     OPT_AUTO_LOCK_ENABLED,
     OPT_AUTO_LOCK_DELAY,
 )
+from .helpers import (
+    get_entry_data,
+    get_users,
+    loaded_entries,
+    lock_title,
+    resolve_locks,
+)
+from .users import (
+    async_add_user,
+    async_remove_user,
+    async_resync,
+    async_update_expiry,
+    async_update_locks,
+    async_update_pin,
+    async_update_start,
+    suggest_slots,
+)
 from .zha_helpers import get_doorlock_cluster, LOCK_SETTINGS
-from .storage import parse_start_datetime, parse_expiry_datetime
-from .scheduler import async_schedule_slot, async_cancel_slot
 
 _LOGGER = logging.getLogger(__name__)
 PANEL_TRANSLATION_KEYS = frozenset({"title", "subtitle", "add_code"})
+
+LOCKS_FIELD = [str]
+
+
+def _guarded(error_code: str):
+    """Turn a `(hass, msg) -> result` coroutine into a websocket handler.
+
+    A raised HomeAssistantError becomes a websocket error with its message
+    (what the panel shows); anything else is logged and reported the same way.
+    """
+
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(hass: HomeAssistant, connection, msg: dict[str, Any]) -> None:
+            try:
+                result = await func(hass, msg)
+            except HomeAssistantError as err:
+                connection.send_error(msg["id"], error_code, str(err))
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.exception("Error in %s", msg.get("type"))
+                connection.send_error(msg["id"], error_code, str(err))
+            else:
+                connection.send_result(msg["id"], result)
+
+        return wrapper
+
+    return decorator
 
 
 @callback
 def async_register_websocket_handlers(hass: HomeAssistant) -> None:
     """Register WebSocket handlers."""
-    websocket_api.async_register_command(hass, handle_list)
-    websocket_api.async_register_command(hass, handle_add)
-    websocket_api.async_register_command(hass, handle_remove)
-    websocket_api.async_register_command(hass, handle_update_expiry)
-    websocket_api.async_register_command(hass, handle_update_start)
-    websocket_api.async_register_command(hass, handle_update_name)
-    websocket_api.async_register_command(hass, handle_update_pin)
-    websocket_api.async_register_command(hass, handle_suggest_slots)
-    websocket_api.async_register_command(hass, handle_config)
-    websocket_api.async_register_command(hass, handle_translations)
-    websocket_api.async_register_command(hass, handle_set_auto_lock)
-    websocket_api.async_register_command(hass, handle_activity)
-    websocket_api.async_register_command(hass, handle_get_lock_settings)
-    websocket_api.async_register_command(hass, handle_set_lock_setting)
+    for handler in (
+        handle_list,
+        handle_add,
+        handle_remove,
+        handle_update_expiry,
+        handle_update_start,
+        handle_update_name,
+        handle_update_pin,
+        handle_update_locks,
+        handle_suggest_slots,
+        handle_config,
+        handle_entries,
+        handle_resync,
+        handle_translations,
+        handle_set_auto_lock,
+        handle_activity,
+        handle_get_lock_settings,
+        handle_set_lock_setting,
+    ):
+        websocket_api.async_register_command(hass, handler)
 
 
-@websocket_api.websocket_command(
-    {
-        vol.Required("type"): WS_TYPE_LIST,
-    }
-)
+# --------------------------------------------------------------------------
+# Shared user list
+# --------------------------------------------------------------------------
+
+
+@websocket_api.websocket_command({vol.Required("type"): WS_TYPE_LIST})
 @websocket_api.async_response
-async def handle_list(
-    hass: HomeAssistant,
-    connection: websocket_api.ActiveConnection,
-    msg: dict[str, Any],
-) -> None:
-    """Handle list command."""
-    try:
-        data = hass.data[DOMAIN]
-        storage = data["storage"]
-
-        entries = storage.list_entries()
-        connection.send_result(
-            msg["id"],
-            {"codes": [entry.to_dict() for entry in entries]},
-        )
-    except Exception as err:
-        _LOGGER.error("Error listing codes: %s", err)
-        connection.send_error(msg["id"], "list_failed", str(err))
+@_guarded("list_failed")
+async def handle_list(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
+    return {"codes": [e.to_dict() for e in get_users(hass).list_entries()]}
 
 
 @websocket_api.websocket_command(
@@ -103,327 +145,62 @@ async def handle_list(
         vol.Optional("start"): str,
         vol.Optional("slot"): int,
         vol.Optional("force", default=False): bool,
+        vol.Optional("locks"): LOCKS_FIELD,
     }
 )
 @websocket_api.async_response
-async def handle_add(
-    hass: HomeAssistant,
-    connection: websocket_api.ActiveConnection,
-    msg: dict[str, Any],
-) -> None:
-    """Handle add command."""
-    try:
-        data = hass.data[DOMAIN]
-        storage = data["storage"]
-        mqtt_adapter = data["mqtt_adapter"]
-        config = data["config"]
-
-        name = msg["name"]
-        pin_code = msg["pin_code"]
-        code_type = msg["code_type"]
-        expiry = msg.get("expiry")
-        start = msg.get("start")
-        preferred_slot = msg.get("slot")
-        force = msg.get("force", False)
-
-        # Validate PIN code is 4-6 digits
-        if not pin_code.isdigit() or not 4 <= len(pin_code) <= 6:
-            connection.send_error(
-                msg["id"], "invalid_input", "PIN code must be 4-6 digits"
-            )
-            return
-
-        # Policy enforcement
-        if code_type == TYPE_GUEST and not expiry:
-            connection.send_error(
-                msg["id"], "invalid_input", "Guest codes must have an expiry date"
-            )
-            return
-
-        # Validate expiry format if provided
-        expiry_dt = None
-        if expiry:
-            try:
-                expiry_dt = parse_expiry_datetime(expiry)
-            except ValueError as err:
-                connection.send_error(
-                    msg["id"], "invalid_input", f"Invalid expiry date format: {err}"
-                )
-                return
-
-        # Validate start format if provided, and that it precedes expiry
-        start_dt = None
-        if start:
-            try:
-                start_dt = parse_start_datetime(start)
-            except ValueError as err:
-                connection.send_error(
-                    msg["id"], "invalid_input", f"Invalid start date format: {err}"
-                )
-                return
-            if expiry_dt and start_dt > expiry_dt:
-                connection.send_error(
-                    msg["id"],
-                    "invalid_input",
-                    "Start date must be on or before the expiry date",
-                )
-                return
-
-        # Determine slot
-        if preferred_slot is not None:
-            slot = preferred_slot
-            # Slot 0 means "no specific user" in decoded lock activity —
-            # never allow a real code to occupy it, regardless of slot_min.
-            if slot == 0:
-                connection.send_error(
-                    msg["id"], "invalid_slot", "Slot 0 is reserved and cannot be used"
-                )
-                return
-            # Check bounds
-            if slot < config["slot_min"] or slot > config["slot_max"]:
-                connection.send_error(
-                    msg["id"],
-                    "invalid_slot",
-                    f"Slot {slot} outside configured range",
-                )
-                return
-            # Check if occupied
-            if storage.is_slot_occupied(slot):
-                if not force and config.get("overwrite_protection", True):
-                    connection.send_error(
-                        msg["id"],
-                        "slot_occupied",
-                        f"Slot {slot} is occupied. Use force to overwrite",
-                    )
-                    return
-        else:
-            # Auto-select slot. Guest/temp codes get their own range starting
-            # at guest_slot_min (default 80) so they don't compete with
-            # permanent codes for the low slot numbers.
-            auto_slot_min = (
-                config.get(CONF_GUEST_SLOT_MIN, DEFAULT_GUEST_SLOT_MIN)
-                if code_type == TYPE_GUEST
-                else config["slot_min"]
-            )
-            slot = storage.find_first_free_slot(
-                auto_slot_min,
-                config["slot_max"],
-                config["reserved_slots"],
-            )
-            if slot is None:
-                connection.send_error(
-                    msg["id"], "no_free_slots", "No free slots available"
-                )
-                return
-
-        # Check reserved slots for auto-assignment
-        if preferred_slot is None and slot in config["reserved_slots"]:
-            connection.send_error(
-                msg["id"], "slot_reserved", f"Slot {slot} is reserved"
-            )
-            return
-
-        # A future start date/time means this code shouldn't work yet — don't
-        # push the PIN to the physical lock at all until then (a scheduled
-        # timer activates it, see scheduler.py).
-        pending_start = start_dt is not None and start_dt > datetime.now()
-
-        if not pending_start:
-            # Send to the lock first (via ZHA or MQTT, depending on configured adapter)
-            try:
-                await mqtt_adapter.add_code(slot, pin_code)
-            except Exception as err:
-                connection.send_error(
-                    msg["id"], "adapter_error", f"Failed to add code to lock: {err}"
-                )
-                return
-
-        # Then store
-        try:
-            entry = await storage.add(
-                slot, name, code_type, expiry, pin=pin_code, start=start
-            )
-            async_schedule_slot(hass, slot)
-            _LOGGER.info(
-                "Added %s code '%s' to slot %s%s",
-                code_type, name, slot, " (pending start)" if pending_start else "",
-            )
-            connection.send_result(msg["id"], {"entry": entry.to_dict()})
-        except Exception as err:
-            # Try to clean up lock if storage fails (only if we actually pushed to it)
-            if not pending_start:
-                try:
-                    await mqtt_adapter.remove_code(slot)
-                except Exception:
-                    pass
-            connection.send_error(msg["id"], "storage_error", str(err))
-            return
-
-    except Exception as err:
-        _LOGGER.error("Error adding code: %s", err)
-        connection.send_error(msg["id"], "add_failed", str(err))
+@_guarded("add_failed")
+async def handle_add(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
+    entry = await async_add_user(
+        hass,
+        name=msg["name"],
+        pin_code=msg["pin_code"],
+        code_type=msg["code_type"],
+        expiry=msg.get("expiry"),
+        start=msg.get("start"),
+        slot=msg.get("slot"),
+        force=msg.get("force", False),
+        locks=msg.get("locks"),
+    )
+    return {"entry": entry.to_dict()}
 
 
 @websocket_api.websocket_command(
-    {
-        vol.Required("type"): WS_TYPE_REMOVE,
-        vol.Required("slot"): int,
-    }
+    {vol.Required("type"): WS_TYPE_REMOVE, vol.Required("slot"): int}
 )
 @websocket_api.async_response
-async def handle_remove(
-    hass: HomeAssistant,
-    connection: websocket_api.ActiveConnection,
-    msg: dict[str, Any],
-) -> None:
-    """Handle remove command."""
-    try:
-        data = hass.data[DOMAIN]
-        storage = data["storage"]
-        mqtt_adapter = data["mqtt_adapter"]
-
-        slot = msg["slot"]
-
-        # Check if slot exists
-        entry = storage.get(slot)
-        if entry is None:
-            connection.send_error(msg["id"], "not_found", f"Slot {slot} not found")
-            return
-
-        # Remove from the lock
-        try:
-            await mqtt_adapter.remove_code(slot)
-        except Exception as err:
-            connection.send_error(
-                msg["id"], "adapter_error", f"Failed to remove code from lock: {err}"
-            )
-            return
-
-        # Remove from storage
-        await storage.remove(slot)
-        async_cancel_slot(hass, slot)
-        _LOGGER.info("Removed code from slot %s", slot)
-        connection.send_result(msg["id"], {"success": True})
-
-    except Exception as err:
-        _LOGGER.error("Error removing code: %s", err)
-        connection.send_error(msg["id"], "remove_failed", str(err))
+@_guarded("remove_failed")
+async def handle_remove(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
+    await async_remove_user(hass, msg["slot"])
+    return {"success": True}
 
 
 @websocket_api.websocket_command(
     {
         vol.Required("type"): WS_TYPE_UPDATE_EXPIRY,
         vol.Required("slot"): int,
-        vol.Optional("expiry"): str,
+        vol.Optional("expiry"): vol.Any(str, None),
     }
 )
 @websocket_api.async_response
-async def handle_update_expiry(
-    hass: HomeAssistant,
-    connection: websocket_api.ActiveConnection,
-    msg: dict[str, Any],
-) -> None:
-    """Handle update_expiry command."""
-    try:
-        data = hass.data[DOMAIN]
-        storage = data["storage"]
-
-        slot = msg["slot"]
-        expiry = msg.get("expiry")
-
-        # Validate expiry format if provided
-        if expiry:
-            try:
-                parse_expiry_datetime(expiry)
-            except ValueError as err:
-                connection.send_error(
-                    msg["id"], "invalid_input", f"Invalid expiry date format: {err}"
-                )
-                return
-
-        # Update storage
-        try:
-            entry = await storage.update_expiry(slot, expiry)
-            async_schedule_slot(hass, slot)
-            _LOGGER.info("Updated expiry for slot %s to %s", slot, expiry)
-            connection.send_result(msg["id"], {"entry": entry.to_dict()})
-        except Exception as err:
-            connection.send_error(msg["id"], "update_failed", str(err))
-
-    except Exception as err:
-        _LOGGER.error("Error updating expiry: %s", err)
-        connection.send_error(msg["id"], "update_failed", str(err))
+@_guarded("update_failed")
+async def handle_update_expiry(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
+    entry = await async_update_expiry(hass, msg["slot"], msg.get("expiry"))
+    return {"entry": entry.to_dict()}
 
 
 @websocket_api.websocket_command(
     {
         vol.Required("type"): WS_TYPE_UPDATE_START,
         vol.Required("slot"): int,
-        vol.Optional("start"): str,
+        vol.Optional("start"): vol.Any(str, None),
     }
 )
 @websocket_api.async_response
-async def handle_update_start(
-    hass: HomeAssistant,
-    connection: websocket_api.ActiveConnection,
-    msg: dict[str, Any],
-) -> None:
-    """Handle update_start command."""
-    try:
-        data = hass.data[DOMAIN]
-        storage = data["storage"]
-        mqtt_adapter = data["mqtt_adapter"]
-
-        slot = msg["slot"]
-        start = msg.get("start")
-
-        entry = storage.get(slot)
-        if entry is None:
-            connection.send_error(msg["id"], "not_found", f"Slot {slot} not found")
-            return
-
-        # Validate start format if provided
-        if start:
-            try:
-                parse_start_datetime(start)
-            except ValueError as err:
-                connection.send_error(
-                    msg["id"], "invalid_input", f"Invalid start date format: {err}"
-                )
-                return
-
-        was_activated = entry.activated
-
-        try:
-            updated = await storage.update_start(slot, start)
-            _LOGGER.info("Updated start date for slot %s to %s", slot, start)
-        except Exception as err:
-            connection.send_error(msg["id"], "update_failed", str(err))
-            return
-
-        # Pushing the start date into the future re-locks a code that was
-        # already on the lock — pull its PIN off so it stops working
-        # immediately, matching what a fresh pending code would do.
-        if was_activated and not updated.activated:
-            try:
-                await mqtt_adapter.remove_code(slot)
-                _LOGGER.info(
-                    "Removed PIN from lock for slot %s — start date pushed to the future",
-                    slot,
-                )
-            except Exception as err:
-                _LOGGER.error(
-                    "Failed to remove PIN from lock for slot %s after rescheduling: %s",
-                    slot,
-                    err,
-                )
-
-        async_schedule_slot(hass, slot)
-        connection.send_result(msg["id"], {"entry": updated.to_dict()})
-
-    except Exception as err:
-        _LOGGER.error("Error updating start date: %s", err)
-        connection.send_error(msg["id"], "update_failed", str(err))
+@_guarded("update_failed")
+async def handle_update_start(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
+    entry = await async_update_start(hass, msg["slot"], msg.get("start"))
+    return {"entry": entry.to_dict()}
 
 
 @websocket_api.websocket_command(
@@ -434,41 +211,14 @@ async def handle_update_start(
     }
 )
 @websocket_api.async_response
-async def handle_update_name(
-    hass: HomeAssistant,
-    connection: websocket_api.ActiveConnection,
-    msg: dict[str, Any],
-) -> None:
-    """Handle update_name command."""
-    try:
-        data = hass.data[DOMAIN]
-        storage = data["storage"]
-
-        slot = msg["slot"]
-        name = msg["name"]
-
-        if not name or not name.strip():
-            connection.send_error(msg["id"], "invalid_input", "Name cannot be empty")
-            return
-
-        # Check if slot exists
-        entry = storage.get(slot)
-        if entry is None:
-            connection.send_error(msg["id"], "not_found", f"Slot {slot} not found")
-            return
-
-        # Update storage
-        try:
-            entry = await storage.update_name(slot, name)
-            _LOGGER.info("Updated name for slot %s to '%s'", slot, name)
-            connection.send_result(msg["id"], {"entry": entry.to_dict()})
-        except Exception as err:
-            connection.send_error(msg["id"], "update_failed", str(err))
-            return
-
-    except Exception as err:
-        _LOGGER.error("Error updating name: %s", err)
-        connection.send_error(msg["id"], "update_failed", str(err))
+@_guarded("update_failed")
+async def handle_update_name(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
+    storage = get_users(hass)
+    slot = msg["slot"]
+    if storage.get(slot) is None:
+        raise HomeAssistantError(f"Slot {slot} not found")
+    entry = await storage.update_name(slot, msg["name"])
+    return {"entry": entry.to_dict()}
 
 
 @websocket_api.websocket_command(
@@ -479,220 +229,171 @@ async def handle_update_name(
     }
 )
 @websocket_api.async_response
-async def handle_update_pin(
-    hass: HomeAssistant,
-    connection: websocket_api.ActiveConnection,
-    msg: dict[str, Any],
-) -> None:
-    """Handle update_pin command - update PIN code for existing slot."""
-    try:
-        data = hass.data[DOMAIN]
-        storage = data["storage"]
-        mqtt_adapter = data["mqtt_adapter"]
+@_guarded("update_failed")
+async def handle_update_pin(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
+    entry = await async_update_pin(hass, msg["slot"], msg["pin_code"])
+    return {"success": True, "entry": entry.to_dict()}
 
-        slot = msg["slot"]
-        pin_code = msg["pin_code"]
 
-        # Check if slot exists
-        entry = storage.get(slot)
-        if entry is None:
-            connection.send_error(msg["id"], "not_found", f"Slot {slot} not found")
-            return
-
-        # Validate PIN code is 4-6 digits
-        if not pin_code.isdigit() or not 4 <= len(pin_code) <= 6:
-            connection.send_error(
-                msg["id"], "invalid_input", "PIN code must be 4-6 digits"
-            )
-            return
-
-        # Send new PIN to the lock (via ZHA or MQTT, depending on configured adapter)
-        _LOGGER.info("Updating PIN for slot %s", slot)
-        try:
-            await mqtt_adapter.add_code(slot, pin_code)
-        except Exception as err:
-            connection.send_error(
-                msg["id"], "adapter_error", f"Failed to update PIN on lock: {err}"
-            )
-            return
-
-        # Persist the new PIN in storage
-        try:
-            entry = await storage.update_pin(slot, pin_code)
-        except Exception as err:
-            _LOGGER.warning("Failed to persist PIN in storage: %s", err)
-
-        _LOGGER.info("Successfully updated PIN for slot %s", slot)
-        connection.send_result(msg["id"], {"success": True, "entry": entry.to_dict()})
-
-    except Exception as err:
-        _LOGGER.error("Error updating PIN: %s", err)
-        connection.send_error(msg["id"], "update_failed", str(err))
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_TYPE_UPDATE_LOCKS,
+        vol.Required("slot"): int,
+        vol.Required("locks"): LOCKS_FIELD,
+    }
+)
+@websocket_api.async_response
+@_guarded("update_failed")
+async def handle_update_locks(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
+    entry = await async_update_locks(hass, msg["slot"], msg["locks"])
+    return {"entry": entry.to_dict()}
 
 
 @websocket_api.websocket_command(
     {
         vol.Required("type"): WS_TYPE_SUGGEST_SLOTS,
         vol.Optional("count", default=5): int,
+        vol.Optional("locks"): LOCKS_FIELD,
+        vol.Optional("code_type", default=TYPE_PERMANENT): vol.In(
+            [TYPE_PERMANENT, TYPE_GUEST]
+        ),
     }
 )
 @websocket_api.async_response
-async def handle_suggest_slots(
-    hass: HomeAssistant,
-    connection: websocket_api.ActiveConnection,
-    msg: dict[str, Any],
-) -> None:
-    """Handle suggest_slots command."""
+@_guarded("suggest_failed")
+async def handle_suggest_slots(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
+    lock_ids = resolve_locks(hass, msg.get("locks"))
+    return {"slots": suggest_slots(hass, lock_ids, msg["code_type"], msg["count"])}
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): WS_TYPE_RESYNC, vol.Optional("locks"): LOCKS_FIELD}
+)
+@websocket_api.async_response
+@_guarded("resync_failed")
+async def handle_resync(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
+    summary = await async_resync(hass, msg.get("locks"))
+    return {
+        "locks": [
+            {"entry_id": lock_id, "title": lock_title(hass, lock_id), **result}
+            for lock_id, result in summary.items()
+        ]
+    }
+
+
+# --------------------------------------------------------------------------
+# Locks
+# --------------------------------------------------------------------------
+
+
+@websocket_api.websocket_command({vol.Required("type"): WS_TYPE_ENTRIES})
+@websocket_api.async_response
+@_guarded("entries_failed")
+async def handle_entries(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
+    """Every configured lock, original first. `loaded` is False for a lock
+    that failed to set up (so the panel can say so instead of hiding it)."""
+    loaded = loaded_entries(hass)
+    locks = []
+    for config_entry in hass.config_entries.async_entries(DOMAIN):
+        data = loaded.get(config_entry.entry_id)
+        locks.append(
+            {
+                "entry_id": config_entry.entry_id,
+                "title": config_entry.title,
+                "lock_entity": (
+                    data["config"].get(CONF_LOCK_ENTITY)
+                    if data
+                    else config_entry.options.get(CONF_LOCK_ENTITY)
+                ),
+                "loaded": data is not None,
+                "state": str(getattr(config_entry.state, "value", config_entry.state)),
+            }
+        )
+    return {"locks": locks}
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): WS_TYPE_CONFIG, vol.Optional("entry_id"): str}
+)
+@websocket_api.async_response
+@_guarded("config_failed")
+async def handle_config(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
+    """Configuration of one lock."""
+    data = get_entry_data(hass, msg.get("entry_id"))
+    config = data["config"]
+    entry = data["entry"]
+    auto_lock_enabled = bool(entry.options.get(OPT_AUTO_LOCK_ENABLED, False))
+    auto_lock_delay = int(entry.options.get(OPT_AUTO_LOCK_DELAY, 300))
+
+    # Find battery sensor: prefer the nimlykoder-owned one, fall back to ZHA,
+    # so the panel can watch hass.states directly.
+    battery_entity = None
+    lock_entity_id = config.get(CONF_LOCK_ENTITY, "")
     try:
-        data = hass.data[DOMAIN]
-        storage = data["storage"]
-        config = data["config"]
-
-        count = msg.get("count", 5)
-        suggestions = []
-
-        for slot in range(max(config["slot_min"], 1), config["slot_max"] + 1):
-            if len(suggestions) >= count:
+        ent_reg = er.async_get(hass)
+        nimly_battery = f"{entry.entry_id}_battery"
+        for ent in ent_reg.entities.values():
+            if ent.unique_id == nimly_battery and not ent.disabled_by:
+                battery_entity = ent.entity_id
                 break
-            if slot in config["reserved_slots"]:
-                continue
-            if not storage.is_slot_occupied(slot):
-                suggestions.append(slot)
+        if battery_entity is None and lock_entity_id:
+            lock_entry = ent_reg.async_get(lock_entity_id)
+            if lock_entry and lock_entry.device_id:
+                for ent in er.async_entries_for_device(ent_reg, lock_entry.device_id):
+                    if ent.domain != "sensor" or ent.disabled_by:
+                        continue
+                    dc = str(ent.device_class or ent.original_device_class or "")
+                    if dc == "battery":
+                        battery_entity = ent.entity_id
+                        break
+                    state = hass.states.get(ent.entity_id)
+                    if state and state.attributes.get("device_class") == "battery":
+                        battery_entity = ent.entity_id
+                        break
+    except Exception:  # noqa: BLE001
+        pass
 
-        connection.send_result(msg["id"], {"slots": suggestions})
-
-    except Exception as err:
-        _LOGGER.error("Error suggesting slots: %s", err)
-        connection.send_error(msg["id"], "suggest_failed", str(err))
-
-
-@websocket_api.websocket_command(
-    {
-        vol.Required("type"): WS_TYPE_CONFIG,
+    return {
+        "entry_id": entry.entry_id,
+        "title": entry.title,
+        "auto_expire": config.get(CONF_AUTO_EXPIRE, True),
+        "cleanup_time": config.get(CONF_CLEANUP_TIME, "03:00:00"),
+        "lock_entity": lock_entity_id,
+        "door_sensor": entry.options.get("door_sensor") or None,
+        "battery_entity": battery_entity,
+        "auto_lock_enabled": auto_lock_enabled,
+        "auto_lock_delay": auto_lock_delay,
     }
-)
+
+
+@websocket_api.websocket_command({vol.Required("type"): WS_TYPE_TRANSLATIONS})
 @websocket_api.async_response
-async def handle_config(
-    hass: HomeAssistant,
-    connection: websocket_api.ActiveConnection,
-    msg: dict[str, Any],
-) -> None:
-    """Handle config command - returns current configuration."""
-    try:
-        data = hass.data[DOMAIN]
-        config = data["config"]
+@_guarded("translations_failed")
+async def handle_translations(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
+    """Panel translations for the current language."""
+    language = hass.config.language or "en"
+    translations_dir = Path(__file__).parent / "panel_translations"
+    translation_file = translations_dir / f"{language}.json"
 
-        # Read auto-lock state from nimlykoder's own config entry
-        entry = data["entry"]
-        auto_lock_enabled = bool(entry.options.get(OPT_AUTO_LOCK_ENABLED, False))
-        auto_lock_delay = int(entry.options.get(OPT_AUTO_LOCK_DELAY, 300))
+    def _load_translations() -> dict:
+        """Load translations from file (runs in executor to avoid blocking)."""
+        file_to_load = translation_file
+        if not file_to_load.exists():
+            file_to_load = translations_dir / "en.json"
+        with open(file_to_load, "r", encoding="utf-8") as f:
+            return json.load(f)
 
-        # Auto-discover the ZHA battery sensor on the same device as the lock.
-        # Returns the entity_id so the panel can watch hass.states directly.
-        # Find battery sensor: prefer the nimlykoder-owned one, fall back to ZHA.
-        battery_entity = None
-        lock_entity_id = config.get(CONF_LOCK_ENTITY, "")
-        try:
-            ent_reg = er.async_get(hass)
-            # 1. Look for nimlykoder battery entity (always reliable)
-            nimly_battery = f"{entry.entry_id}_battery"
-            for ent in ent_reg.entities.values():
-                if ent.unique_id == nimly_battery and not ent.disabled_by:
-                    battery_entity = ent.entity_id
-                    break
-            # 2. Fallback: ZHA battery sensor on the same device
-            if battery_entity is None and lock_entity_id:
-                lock_entry = ent_reg.async_get(lock_entity_id)
-                if lock_entry and lock_entry.device_id:
-                    for ent in er.async_entries_for_device(ent_reg, lock_entry.device_id):
-                        if ent.domain != "sensor" or ent.disabled_by:
-                            continue
-                        dc = str(ent.device_class or ent.original_device_class or "")
-                        if dc == "battery":
-                            battery_entity = ent.entity_id
-                            break
-                        state = hass.states.get(ent.entity_id)
-                        if state and state.attributes.get("device_class") == "battery":
-                            battery_entity = ent.entity_id
-                            break
-        except Exception:
-            pass
+    translations = await hass.async_add_executor_job(_load_translations)
 
-        connection.send_result(
-            msg["id"],
-            {
-                "auto_expire": config.get(CONF_AUTO_EXPIRE, True),
-                "cleanup_time": config.get(CONF_CLEANUP_TIME, "03:00:00"),
-                "lock_entity": lock_entity_id,
-                "door_sensor": entry.options.get("door_sensor") or None,
-                "battery_entity": battery_entity,
-                "auto_lock_enabled": auto_lock_enabled,
-                "auto_lock_delay": auto_lock_delay,
-            },
-        )
+    # Keep support for both direct panel dictionaries and legacy nested format
+    if isinstance(translations, dict) and PANEL_TRANSLATION_KEYS.issubset(translations):
+        panel_translations = translations
+    elif isinstance(translations.get("panel"), dict):
+        panel_translations = translations["panel"]
+    else:
+        panel_translations = {}
 
-    except Exception as err:
-        _LOGGER.error("Error getting config: %s", err)
-        connection.send_error(msg["id"], "config_failed", str(err))
-
-
-@websocket_api.websocket_command(
-    {
-        vol.Required("type"): WS_TYPE_TRANSLATIONS,
-    }
-)
-@websocket_api.async_response
-async def handle_translations(
-    hass: HomeAssistant,
-    connection: websocket_api.ActiveConnection,
-    msg: dict[str, Any],
-) -> None:
-    """Handle translations command - returns panel translations for current language."""
-    import json
-    from pathlib import Path
-
-    try:
-        # Get user's language from hass config
-        language = hass.config.language or "en"
-
-        # Path to panel translation overrides
-        translations_dir = Path(__file__).parent / "panel_translations"
-
-        # Try to load the user's language, fallback to English
-        translation_file = translations_dir / f"{language}.json"
-
-        def _load_translations() -> dict:
-            """Load translations from file (runs in executor to avoid blocking)."""
-            file_to_load = translation_file
-            if not file_to_load.exists():
-                file_to_load = translations_dir / "en.json"
-            with open(file_to_load, "r", encoding="utf-8") as f:
-                return json.load(f)
-
-        # Run file I/O in executor to avoid blocking the event loop
-        translations = await hass.async_add_executor_job(_load_translations)
-
-        # Keep support for both direct panel dictionaries and legacy nested format
-        if isinstance(translations, dict) and PANEL_TRANSLATION_KEYS.issubset(
-            translations
-        ):
-            panel_translations = translations
-        elif isinstance(translations.get("panel"), dict):
-            panel_translations = translations["panel"]
-        else:
-            panel_translations = {}
-
-        connection.send_result(
-            msg["id"],
-            {
-                "language": language,
-                "translations": panel_translations,
-            },
-        )
-
-    except Exception as err:
-        _LOGGER.error("Error getting translations: %s", err)
-        connection.send_error(msg["id"], "translations_failed", str(err))
+    return {"language": language, "translations": panel_translations}
 
 
 @websocket_api.websocket_command(
@@ -700,99 +401,72 @@ async def handle_translations(
         vol.Required("type"): WS_TYPE_SET_AUTO_LOCK,
         vol.Required("enabled"): bool,
         vol.Optional("delay", default=300): int,
+        vol.Optional("entry_id"): str,
     }
 )
 @websocket_api.async_response
-async def handle_set_auto_lock(
-    hass: HomeAssistant,
-    connection: websocket_api.ActiveConnection,
-    msg: dict[str, Any],
-) -> None:
-    """Enable or disable persistent auto-lock, stored in nimlykoder's config entry.
+@_guarded("set_auto_lock_failed")
+async def handle_set_auto_lock(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
+    """Enable or disable auto-lock for one lock (stored in its config entry).
 
     The auto-lock listener in __init__.py reads entry.options live, so the
     change takes effect immediately without a restart.
     """
-    try:
-        enabled = msg["enabled"]
-        delay = max(5, int(msg.get("delay", 300)))
-
-        data = hass.data.get(DOMAIN)
-        if not data:
-            connection.send_error(msg["id"], "set_auto_lock_failed", "Nimlykoder not loaded")
-            return
-
-        entry = data["entry"]
-        new_options = {
+    enabled = msg["enabled"]
+    delay = max(5, int(msg.get("delay", 300)))
+    entry = get_entry_data(hass, msg.get("entry_id"))["entry"]
+    hass.config_entries.async_update_entry(
+        entry,
+        options={
             **entry.options,
             OPT_AUTO_LOCK_ENABLED: enabled,
             OPT_AUTO_LOCK_DELAY: delay,
-        }
-        hass.config_entries.async_update_entry(entry, options=new_options)
-
-        _LOGGER.info(
-            "Auto-lock %s (delay=%ds) saved to nimlykoder config entry",
-            "enabled" if enabled else "disabled",
-            delay,
-        )
-
-        connection.send_result(
-            msg["id"],
-            {"success": True, "enabled": enabled, "delay": delay},
-        )
-
-    except Exception as err:
-        _LOGGER.error("Error setting auto-lock: %s", err)
-        connection.send_error(msg["id"], "set_auto_lock_failed", str(err))
+        },
+    )
+    _LOGGER.info(
+        "Auto-lock %s (delay=%ds) saved for %s",
+        "enabled" if enabled else "disabled", delay, entry.title,
+    )
+    return {"success": True, "enabled": enabled, "delay": delay}
 
 
-@websocket_api.websocket_command({vol.Required("type"): WS_TYPE_ACTIVITY})
+@websocket_api.websocket_command(
+    {vol.Required("type"): WS_TYPE_ACTIVITY, vol.Optional("entry_id"): str}
+)
 @websocket_api.async_response
-async def handle_activity(
-    hass: HomeAssistant,
-    connection: websocket_api.ActiveConnection,
-    msg: dict[str, Any],
-) -> None:
-    """Return the in-memory activity log for the nimlykoder lock."""
-    try:
-        data = hass.data.get(DOMAIN, {})
-        log = data.get("activity_log", [])
-        connection.send_result(msg["id"], {"entries": log})
-    except Exception as err:
-        _LOGGER.error("Error getting activity log: %s", err)
-        connection.send_error(msg["id"], "activity_failed", str(err))
+@_guarded("activity_failed")
+async def handle_activity(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
+    """The in-memory activity log of one lock."""
+    data = get_entry_data(hass, msg.get("entry_id"))
+    return {"entries": data.get("activity_log", [])}
 
 
-@websocket_api.websocket_command({vol.Required("type"): WS_TYPE_GET_LOCK_SETTINGS})
-@websocket_api.async_response
-async def handle_get_lock_settings(
-    hass: HomeAssistant,
-    connection: websocket_api.ActiveConnection,
-    msg: dict[str, Any],
-) -> None:
-    """Read current DoorLock settings directly from the Zigbee device."""
-    data = hass.data.get(DOMAIN, {})
+def _zha_cluster(hass: HomeAssistant, msg: dict[str, Any]):
+    """DoorLock cluster of the addressed lock, or raise a HomeAssistantError."""
+    data = get_entry_data(hass, msg.get("entry_id"))
     zha_ieee = data.get("zha_ieee")
     endpoint_id = data.get("config", {}).get(CONF_ZHA_ENDPOINT_ID, DEFAULT_ZHA_ENDPOINT_ID)
-
     if not zha_ieee:
-        connection.send_error(msg["id"], "not_zha", "Lock is not a ZHA device")
-        return
-
+        raise HomeAssistantError("Lock is not a ZHA device")
     cluster = get_doorlock_cluster(hass, zha_ieee, endpoint_id)
     if cluster is None:
-        connection.send_error(
-            msg["id"], "cluster_unavailable",
+        raise HomeAssistantError(
             "DoorLock cluster not reachable — interact with the lock first to wake it"
         )
-        return
+    return cluster
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): WS_TYPE_GET_LOCK_SETTINGS, vol.Optional("entry_id"): str}
+)
+@websocket_api.async_response
+@_guarded("read_failed")
+async def handle_get_lock_settings(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
+    """Read current DoorLock settings directly from the Zigbee device."""
+    cluster = _zha_cluster(hass, msg)
 
     attr_ids = [meta["attr_id"] for meta in LOCK_SETTINGS.values()]
-    try:
-        result, _failed = await cluster.read_attributes(attr_ids, allow_cache=False)
-    except Exception as err:
-        connection.send_error(msg["id"], "read_failed", str(err))
-        return
+    result, _failed = await cluster.read_attributes(attr_ids, allow_cache=False)
 
     # Build response keyed by setting name; value may be an enum — coerce to int/bool
     settings = {}
@@ -805,10 +479,10 @@ async def handle_get_lock_settings(
             continue
         try:
             settings[name] = bool(raw) if meta["type"] == "bool" else int(raw)
-        except Exception:
+        except Exception:  # noqa: BLE001
             settings[name] = raw
 
-    connection.send_result(msg["id"], {"settings": settings, "schema": LOCK_SETTINGS})
+    return {"settings": settings, "schema": LOCK_SETTINGS}
 
 
 @websocket_api.websocket_command(
@@ -816,35 +490,18 @@ async def handle_get_lock_settings(
         vol.Required("type"): WS_TYPE_SET_LOCK_SETTING,
         vol.Required("setting"): str,
         vol.Required("value"): vol.Any(bool, int),
+        vol.Optional("entry_id"): str,
     }
 )
 @websocket_api.async_response
-async def handle_set_lock_setting(
-    hass: HomeAssistant,
-    connection: websocket_api.ActiveConnection,
-    msg: dict[str, Any],
-) -> None:
+@_guarded("write_failed")
+async def handle_set_lock_setting(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
     """Write a single DoorLock attribute to the Zigbee device."""
     setting = msg["setting"]
     if setting not in LOCK_SETTINGS:
-        connection.send_error(msg["id"], "invalid_setting", f"Unknown setting: {setting}")
-        return
+        raise HomeAssistantError(f"Unknown setting: {setting}")
 
-    data = hass.data.get(DOMAIN, {})
-    zha_ieee = data.get("zha_ieee")
-    endpoint_id = data.get("config", {}).get(CONF_ZHA_ENDPOINT_ID, DEFAULT_ZHA_ENDPOINT_ID)
-
-    if not zha_ieee:
-        connection.send_error(msg["id"], "not_zha", "Lock is not a ZHA device")
-        return
-
-    cluster = get_doorlock_cluster(hass, zha_ieee, endpoint_id)
-    if cluster is None:
-        connection.send_error(
-            msg["id"], "cluster_unavailable",
-            "DoorLock cluster not reachable — interact with the lock first to wake it"
-        )
-        return
+    cluster = _zha_cluster(hass, msg)
 
     meta = LOCK_SETTINGS[setting]
     value = msg["value"]
@@ -853,10 +510,6 @@ async def handle_set_lock_setting(
     elif meta["type"] in ("int", "select"):
         value = int(value)
 
-    try:
-        result = await cluster.write_attributes({setting: value})
-        _LOGGER.info("Lock setting %s set to %s (result=%s)", setting, value, result)
-        connection.send_result(msg["id"], {"success": True, "setting": setting, "value": value})
-    except Exception as err:
-        _LOGGER.error("Error writing lock setting %s=%s: %s", setting, value, err)
-        connection.send_error(msg["id"], "write_failed", str(err))
+    result = await cluster.write_attributes({setting: value})
+    _LOGGER.info("Lock setting %s set to %s (result=%s)", setting, value, result)
+    return {"success": True, "setting": setting, "value": value}

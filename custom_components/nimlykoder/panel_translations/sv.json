@@ -51,6 +51,9 @@
     "permanent_no_expiry": "Permanenta koder har inget utgångsdatum.",
     "start": "Startdatum",
     "start_hint": "Lämna tomt för att aktivera direkt. Om det sätts i framtiden fungerar koden inte i låset förrän detta datum.",
+    "locks": "Lås",
+    "locks_hint": "Personen kan öppna de valda låsen och använder samma plats på varje lås.",
+    "lock_unavailable": "inte laddat",
     "slot": "Plats",
     "next_available": "Nästa lediga",
     "suggested_slot": "Föreslagen plats",
@@ -63,7 +66,25 @@
   },
   "errors": {
     "name_required": "Namn krävs",
-    "pin_invalid": "PIN-koden måste vara 4-6 siffror"
+    "pin_invalid": "PIN-koden måste vara 4-6 siffror",
+    "lock_required": "Välj minst ett lås"
+  },
+  "lock_select": {
+    "title": "Lås som visas nedan"
+  },
+  "lock_unavailable": {
+    "banner": "Låset \"{title}\" är inte laddat (status: {state}). Dess personer kan inte ändras förrän det är laddat — kontrollera Inställningar → Enheter & tjänster → Nimlykoder."
+  },
+  "sync": {
+    "button": "Synka alla lås",
+    "syncing": "Synkar...",
+    "hint": "Gör så att varje lås matchar listan: skriv varje persons PIN till de lås personen har tillgång till och rensa den från övriga",
+    "done": "Synkning klar",
+    "pushed": "{n} skrivna",
+    "removed": "{n} rensade",
+    "failed_slots": "misslyckades: plats {slots}",
+    "failed": "Synkning misslyckades: {error}",
+    "dismiss": "Stäng"
   },
   "empty": {
     "title": "Inga PIN-koder ännu",

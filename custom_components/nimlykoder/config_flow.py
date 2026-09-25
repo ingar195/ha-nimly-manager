@@ -66,9 +66,15 @@ class NimlykoderConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if user_input[CONF_SLOT_MIN] > user_input[CONF_SLOT_MAX]:
                 errors["base"] = "invalid_slot_range"
             else:
-                # Check if already configured
-                await self.async_set_unique_id(DOMAIN)
+                # One entry per lock: the same lock can't be added twice.
+                # (The original single-lock entry has unique_id "nimlykoder",
+                # so also compare against the lock entity in existing options.)
+                lock_entity = user_input[CONF_LOCK_ENTITY]
+                await self.async_set_unique_id(lock_entity)
                 self._abort_if_unique_id_configured()
+                for existing in self._async_current_entries():
+                    if existing.options.get(CONF_LOCK_ENTITY) == lock_entity:
+                        return self.async_abort(reason="already_configured")
 
                 # Convert reserved_slots from string to list
                 options = dict(user_input)

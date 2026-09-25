@@ -61,6 +61,16 @@ add_code:
       default: false
       selector:
         boolean:
+    locks:
+      name: Locks
+      description: >-
+        Locks this person can open (lock entity ids or config entry ids). The
+        same slot is used on every lock. Defaults to the original lock.
+      example: '["lock.front_door", "lock.back_door"]'
+      selector:
+        entity:
+          domain: lock
+          multiple: true
 
 remove_code:
   name: Remove Code
@@ -169,6 +179,48 @@ update_pin:
       example: "654321"
       selector:
         text:
+
+update_locks:
+  name: Update Locks
+  description: >-
+    Change which locks a person can open. The PIN is written to newly added
+    locks and cleared from removed ones.
+  fields:
+    slot:
+      name: Slot Number
+      description: Slot number to update
+      required: true
+      example: 10
+      selector:
+        number:
+          min: 0
+          max: 99
+          mode: box
+    locks:
+      name: Locks
+      description: Lock entity ids or config entry ids this person can open
+      required: true
+      example: '["lock.front_door"]'
+      selector:
+        entity:
+          domain: lock
+          multiple: true
+
+resync:
+  name: Sync All Locks
+  description: >-
+    Make the locks match the shared user list: write every active person's
+    PIN to the locks they can open and clear it from all others. Codes in
+    slots that don't belong to any listed person are left alone.
+  fields:
+    locks:
+      name: Locks
+      description: Only sync these locks (default all)
+      example: '["lock.front_door"]'
+      selector:
+        entity:
+          domain: lock
+          multiple: true
 
 list_codes:
   name: List Codes

@@ -45,7 +45,7 @@ class NimlyAutoLockDelaySensor(SensorEntity):
         self._attr_unique_id = f"{entry.entry_id}_auto_lock_delay"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
-            name="Nimlykoder",
+            name=entry.title,
             manufacturer="Nimlykoder",
         )
 
@@ -81,7 +81,7 @@ class NimlyBatterySensor(SensorEntity):
         self._attr_unique_id = f"{entry.entry_id}_battery"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
-            name="Nimlykoder",
+            name=entry.title,
             manufacturer="Nimlykoder",
         )
         self._battery_pct: int | None = None
@@ -148,7 +148,9 @@ class NimlyBatterySensor(SensorEntity):
 
     def _get_power_cluster(self):
         """Find the PowerConfiguration cluster for the Nimly lock."""
-        data = self._hass.data.get(DOMAIN, {})
+        data = self._hass.data.get(DOMAIN, {}).get("entries", {}).get(
+            self._entry.entry_id, {}
+        )
         zha_ieee = data.get("zha_ieee")
         if not zha_ieee:
             return None

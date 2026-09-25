@@ -20,13 +20,17 @@ async def async_register_panel(hass: HomeAssistant) -> None:
         # Register URL for serving the panel frontend files
         frontend_path = Path(__file__).parent / "frontend" / "dist"
 
-        # Register static path for frontend files
-        await hass.http.async_register_static_paths(
-            [StaticPathConfig(f"/{DOMAIN}_panel", str(frontend_path), cache_headers=False)]
-        )
+        # Register static path for frontend files — once per HA run: routes
+        # can't be removed, and the panel is re-registered on every reload.
+        static_key = f"{DOMAIN}_static_registered"
+        if not hass.data.get(static_key):
+            await hass.http.async_register_static_paths(
+                [StaticPathConfig(f"/{DOMAIN}_panel", str(frontend_path), cache_headers=False)]
+            )
+            hass.data[static_key] = True
 
         # Register the custom panel — version bump forces browser cache invalidation
-        _PANEL_VERSION = "20260914-3"
+        _PANEL_VERSION = "20260925-2"
         await panel_custom.async_register_panel(
             hass,
             webcomponent_name="nimlykoder-panel",

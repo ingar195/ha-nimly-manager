@@ -5,9 +5,11 @@ A complete HACS integration for managing PIN codes on Nimly smart locks via Zigb
 ## Features
 
 - ✅ **Persistent Storage** - All PIN codes stored persistently across restarts
-- 🔐 **MQTT Integration** - Seamless communication with Nimly locks via Zigbee2MQTT
+- 🔐 **ZHA and Zigbee2MQTT** - Talks to Nimly locks via ZHA or Zigbee2MQTT (picked automatically per lock)
+- 🚪 **Multiple Locks** - Any number of locks, one shared list of people, per-person lock access
+- 🔄 **Sync All Locks** - One click makes every lock match the shared list
 - 🎯 **Auto Slot Assignment** - Automatic slot allocation with reserved slot protection
-- ⏰ **Guest Code Expiry** - Set expiration dates for guest codes with automatic cleanup
+- ⏰ **Exact Start and Expiry** - Guest codes activate and expire at an exact date and time, with automatic cleanup
 - 🖥️ **Sidebar Panel UI** - Beautiful panel interface for managing codes
 - 🌐 **Bilingual** - Full support for English and Swedish
 - 🔧 **Service Calls** - Control via Home Assistant services and automations
@@ -33,10 +35,11 @@ Copy `custom_components/nimlykoder/` to your Home Assistant's `custom_components
 ## Quick Start
 
 1. **Configure Integration**: Settings → Devices & Services → Add Integration → Nimlykoder
-2. **Set MQTT Topic**: Enter your Zigbee2MQTT device topic (e.g., `zigbee2mqtt/nimly_lock`)
+2. **Pick the lock**: Choose the lock entity (ZHA or Zigbee2MQTT) and name the entry, e.g. "Front door"
 3. **Configure Slots**: Set slot range (0-99) and reserved slots (1-3)
 4. **Access Panel**: Click "Nimlykoder" in sidebar
 5. **Add First Code**: Click "Add Code" button
+6. **More locks**: Repeat steps 1-3 per lock (see [Multiple locks](#multiple-locks))
 
 📘 **[Example Automations](examples/automations.md)** - Ready-to-use automation examples
 
@@ -46,26 +49,30 @@ Copy `custom_components/nimlykoder/` to your Home Assistant's `custom_components
 
 After installation, you'll find "Nimlykoder" in your Home Assistant sidebar. The panel shows:
 
-- List of all configured PIN codes
-- Slot number, name, type (permanent/guest), expiry, and status
-- Actions to edit expiry or remove codes
-- Button to add new codes
+- One list of people, shared by all locks
+- Slot, name, type (permanent/guest), start, expiry, status and the locks each person can open
+- Actions to edit or remove people, and (with several locks) **Sync all locks**
+- Status, lock/unlock, battery, door sensor and activity log for the lock selected in the header
 
 #### Adding a Code
 
 1. Click **Add Code**
 2. Enter:
    - **Name**: Friendly name for the code
-   - **PIN Code**: 4-digit PIN
+   - **PIN Code**: 4-6 digit PIN
+   - **Locks**: Which locks this person can open (several locks only)
    - **Type**: Permanent or Guest
-   - **Expiry Date**: Required for guest codes
    - **Slot**: Leave empty for auto-assignment or specify a slot number
+   - **Expiry**: Required for guest codes. Date, plus an optional time
+   - **Start**: Optional date and time. Until then the PIN is not sent to any lock
 
-#### Editing Expiry
+A person has **one slot, used on every lock they can open**. A date without a time
+means start of that day for **Start** and end of that day for **Expiry**.
 
-1. Click **Edit** next to a code
-2. Update the expiry date
-3. Click **Update**
+#### Editing
+
+Click **Edit** to change name, expiry, start, lock access or PIN. Changing lock
+access writes the PIN to added locks and clears it from removed ones.
 
 #### Removing a Code
 
@@ -86,15 +93,21 @@ data:
   name: "Guest User"
   pin_code: "1234"
   type: guest
-  expiry: "2026-12-31"
+  expiry: "2026-12-31T11:00"   # date, or date + time for an exact moment
   # Optional:
+  # start: "2026-12-28T15:00"  # PIN only reaches the lock(s) at this time
   # slot: 10
   # force: false
+  # locks: [lock.front_door, lock.back_door]   # default: the original lock
 ```
+
+Returns the created entry as a service response. `locks` takes lock entity ids or
+config entry ids; leave it out and the code goes to the original (first) lock, so
+older automations keep working.
 
 #### `nimlykoder.remove_code`
 
-Remove a PIN code.
+Remove a person from every lock they can open.
 
 ```yaml
 service: nimlykoder.remove_code
@@ -102,24 +115,69 @@ data:
   slot: 10
 ```
 
-#### `nimlykoder.update_expiry`
+#### `nimlykoder.update_expiry` / `nimlykoder.update_start`
 
-Update expiry date for a code.
+Change when a code expires / becomes active (date or date + time; leave out to clear).
+Moving a start into the future pulls the PIN off the locks again.
 
 ```yaml
 service: nimlykoder.update_expiry
 data:
   slot: 10
-  expiry: "2027-01-31"  # or null to remove expiry
+  expiry: "2027-01-31T09:00"
 ```
 
-#### `nimlykoder.list_codes`
-
-List all configured codes (returns service response).
+#### `nimlykoder.update_name` / `nimlykoder.update_pin`
 
 ```yaml
-service: nimlykoder.list_codes
+service: nimlykoder.update_pin
+data:
+  slot: 10
+  pin_code: "654321"   # written to every lock the person can open
 ```
+
+#### `nimlykoder.update_locks`
+
+Change which locks a person can open. The PIN is written to added locks and cleared from removed ones.
+
+```yaml
+service: nimlykoder.update_locks
+data:
+  slot: 10
+  locks: [lock.front_door]
+```
+
+#### `nimlykoder.resync`
+
+Make locks match the shared list (same as **Sync all locks**). Active people get their
+PIN written to their locks; everyone else's slot is cleared. Slots that belong to nobody
+in the list are never touched. Returns a per-lock summary.
+
+```yaml
+service: nimlykoder.resync
+data:
+  # locks: [lock.back_door]   # default: all locks
+```
+
+#### `nimlykoder.list_codes` / `nimlykoder.cleanup_expired` / `nimlykoder.set_auto_lock`
+
+`list_codes` returns all people with their locks; `cleanup_expired` removes expired
+guest codes now; `set_auto_lock` takes `enabled`, `delay_seconds` and optional `lock`.
+
+### Multiple locks
+
+Every lock is its own config entry (Settings → Devices & Services → Nimlykoder → Add entry).
+
+- One list of people for all locks; each person can open any subset of them.
+- A person uses the **same slot on every lock they can open**, so a slot is unique across locks.
+- Name, PIN, type, start and expiry are shared, not per lock.
+- The header dropdown (shown with more than one lock) picks which lock's status,
+  lock/unlock, auto-lock, settings and activity log you see.
+- A lock that fails to load is flagged in the panel. People keep their access to it,
+  but it can't be granted until it loads.
+- Removing a lock entry removes it from everyone's access.
+- Single-lock setups upgrade in place: existing people are assigned to the original lock.
+- `nimlykoder_wrong_pin_attempt` events include `entry_id` and `lock_entity`.
 
 ### Automations
 
@@ -288,7 +346,10 @@ custom_components/nimlykoder/
 ├── manifest.json         # Integration metadata
 ├── const.py             # Constants and defaults
 ├── config_flow.py       # Configuration flow
-├── storage.py           # Persistent storage
+├── storage.py           # Persistent storage (shared user list)
+├── helpers.py           # Lock lookup, slot ranges, fan-out to locks
+├── users.py             # User operations across locks (add, update, resync...)
+├── scheduler.py         # Exact-time start/expiry timers
 ├── services.py          # Service handlers
 ├── websocket.py         # WebSocket API
 ├── panel.py             # Panel registration
@@ -300,7 +361,11 @@ custom_components/nimlykoder/
 └── translations/
     ├── en.json         # English translations
     └── sv.json         # Swedish translations
+tests/
+└── test_multilock.py    # Standalone tests, no Home Assistant needed
 ```
+
+Run the tests with `python tests/test_multilock.py`.
 
 ## Contributing
 

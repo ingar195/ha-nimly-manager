@@ -28,7 +28,7 @@ class NimlyAutoLockBinarySensor(BinarySensorEntity):
         self._attr_unique_id = f"{entry.entry_id}_auto_lock_enabled"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
-            name="Nimlykoder",
+            name=entry.title,
             manufacturer="Nimlykoder",
         )
 
