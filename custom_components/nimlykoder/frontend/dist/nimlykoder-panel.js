@@ -149,6 +149,7 @@ class NimlykoderPanel extends LitElement {
                 start_hint: "Leave empty to activate immediately. If set in the future, the code won't work at the lock until this date.",
                 locks: "Locks",
                 locks_hint: "This person can open the selected locks, using the same slot on each.",
+                lock_unavailable: "not loaded",
                 slot: "Slot",
                 next_available: "Next available",
                 cancel: "Cancel",
@@ -163,6 +164,9 @@ class NimlykoderPanel extends LitElement {
             },
             lock_select: {
                 title: "Lock shown below",
+            },
+            lock_unavailable: {
+                banner: "Lock \"{title}\" is not loaded (state: {state}). Its people can't be changed until it is — check Settings → Devices & Services → Nimlykoder.",
             },
             sync: {
                 button: "Sync all locks",
@@ -286,25 +290,47 @@ class NimlykoderPanel extends LitElement {
                 color: var(--primary-color);
             }
 
+            .lock-chip.unavailable {
+                background: rgba(244, 67, 54, 0.12);
+                color: #c62828;
+                text-decoration: line-through;
+            }
+
+            .form-group .lock-option.unavailable {
+                opacity: 0.6;
+                cursor: not-allowed;
+            }
+
             .lock-picker {
                 display: flex;
                 flex-direction: column;
-                gap: 6px;
-                max-height: 140px;
+                gap: 4px;
+                max-height: 180px;
                 overflow-y: auto;
+                padding: 8px 12px;
+                border: 1px solid var(--primary-color);
+                border-radius: 8px;
+                background: rgba(3, 169, 244, 0.06);
             }
 
             .form-group .lock-option {
                 display: flex;
                 align-items: center;
-                gap: 8px;
+                gap: 10px;
                 margin: 0;
-                font-weight: 400;
+                padding: 6px 0;
+                font-size: 15px;
+                font-weight: 500;
                 cursor: pointer;
             }
 
             .form-group .lock-option input {
-                width: auto;
+                width: 18px;
+                height: 18px;
+                accent-color: var(--primary-color);
+            }
+
+            .form-group .lock-option input {
                 padding: 0;
                 margin: 0;
             }
@@ -1265,10 +1291,10 @@ class NimlykoderPanel extends LitElement {
         }
         let saved = null;
         try { saved = localStorage.getItem("nimlykoder_lock"); } catch (e) { /* storage unavailable */ }
-        const known = (id) => this.locks.some((l) => l.entry_id === id);
+        const known = (id) => this.loadedLocks.some((l) => l.entry_id === id);
         this.selectedLockId = known(this.selectedLockId) ? this.selectedLockId
             : known(saved) ? saved
-            : (this.locks[0] ? this.locks[0].entry_id : null);
+            : (this.loadedLocks[0] ? this.loadedLocks[0].entry_id : null);
     }
 
     _onLockSelected(e) {
@@ -1285,7 +1311,31 @@ class NimlykoderPanel extends LitElement {
         return this.selectedLockId ? { ...msg, entry_id: this.selectedLockId } : msg;
     }
 
+    // All configured locks count for the multi-lock UI; only loaded ones can be
+    // shown/edited (a lock that failed to set up is flagged, not hidden).
     get multiLock() { return this.locks.length > 1; }
+    get loadedLocks() { return this.locks.filter((l) => l.loaded !== false); }
+    get unloadedLocks() { return this.locks.filter((l) => l.loaded === false); }
+
+    _lockLoaded(entryId) {
+        const lock = this.locks.find((l) => l.entry_id === entryId);
+        return !lock || lock.loaded !== false;
+    }
+
+    _renderUnloadedWarning() {
+        if (this.unloadedLocks.length === 0) return "";
+        return html`
+            <div class="error-banner">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M13,13H11V7H13M13,17H11V15H13M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z"/>
+                </svg>
+                <span>
+                    ${this.unloadedLocks.map((l) => html`<div>${this.t("lock_unavailable.banner", { title: l.title, state: l.state || "?" })}</div>`)}
+                </span>
+                <button class="btn btn-text" @click=${() => this._init()}>${this.t("retry")}</button>
+            </div>
+        `;
+    }
 
     _lockTitle(entryId) {
         const lock = this.locks.find((l) => l.entry_id === entryId);
@@ -1515,6 +1565,7 @@ class NimlykoderPanel extends LitElement {
             ${this._renderAppHeader()}
             <div class="container">
                 ${this.error ? this._renderError() : ""}
+                ${this._renderUnloadedWarning()}
                 ${this.loading
                     ? this._renderLoading()
                     : html`
@@ -1585,9 +1636,9 @@ class NimlykoderPanel extends LitElement {
                         <path d="M3,6H21V8H3V6M3,11H21V13H3V11M3,16H21V18H3V16Z"/>
                     </svg>
                 </button>
-                ${this.multiLock ? html`
+                ${this.loadedLocks.length > 1 ? html`
                     <select class="lock-select" @change=${this._onLockSelected} title="${this.t("lock_select.title")}">
-                        ${this.locks.map((l) => html`
+                        ${this.loadedLocks.map((l) => html`
                             <option value="${l.entry_id}" ?selected=${l.entry_id === this.selectedLockId}>${l.title}</option>
                         `)}
                     </select>
@@ -1858,7 +1909,8 @@ class NimlykoderPanel extends LitElement {
                             </span>
                         ` : ""}
                         ${this.multiLock ? (code.locks || []).map((id) => html`
-                            <span class="lock-chip">${this._lockTitle(id)}</span>
+                            <span class="lock-chip ${this._lockLoaded(id) ? "" : "unavailable"}"
+                                title="${this._lockLoaded(id) ? "" : this.t("dialog.lock_unavailable")}">${this._lockTitle(id)}</span>
                         `) : ""}
                     </div>
                 </div>
@@ -2205,11 +2257,12 @@ class NimlykoderPanel extends LitElement {
                 <label>${this.t("dialog.locks")}</label>
                 <div class="lock-picker">
                     ${this.locks.map((l) => html`
-                        <label class="lock-option">
+                        <label class="lock-option ${l.loaded === false ? "unavailable" : ""}">
                             <input type="checkbox"
+                                ?disabled=${l.loaded === false}
                                 .checked=${selected.includes(l.entry_id)}
                                 @change=${(e) => onToggle(l.entry_id, e.target.checked)} />
-                            ${l.title}
+                            ${l.title}${l.loaded === false ? html` <small>(${this.t("dialog.lock_unavailable")})</small>` : ""}
                         </label>
                     `)}
                 </div>
@@ -2271,6 +2324,7 @@ class NimlykoderPanel extends LitElement {
                             <input type="password" id="add-pin" placeholder="${this.t("dialog.pin_placeholder")}" pattern="[0-9]{4,6}" maxlength="6" required />
                             <small>${this.t("dialog.pin_hint")}</small>
                         </div>
+                        ${this._renderLockPicker(this.addLocks, (id, on) => this._toggleAddLock(id, on))}
                         <div class="form-row">
                             <div class="form-group">
                                 <label for="add-type">${this.t("dialog.type")} *</label>
@@ -2285,7 +2339,6 @@ class NimlykoderPanel extends LitElement {
                                 <small>${this.t("dialog.next_available")}: ${this.suggestedSlot !== null ? this.suggestedSlot : "..."}</small>
                             </div>
                         </div>
-                        ${this._renderLockPicker(this.addLocks, (id, on) => this._toggleAddLock(id, on))}
                         <div class="form-group" id="expiry-group" style="display: none;">
                             <label for="add-expiry">${this.t("dialog.expiry")}</label>
                             <div class="form-row">
@@ -2331,6 +2384,7 @@ class NimlykoderPanel extends LitElement {
                             <input type="text" id="edit-name" .value=${this.editingCode.name} placeholder="${this.t("dialog.name_placeholder")}" @input=${() => this.editFormError = null} />
                             ${this.editFormError === "name_required" ? html`<small class="field-error">${this.t("errors.name_required")}</small>` : ""}
                         </div>
+                        ${this._renderLockPicker(this.editLocks, (id, on) => this._toggleEditLock(id, on))}
                         ${isGuest ? html`
                             <div class="form-group">
                                 <label for="edit-expiry">${this.t("dialog.expiry")}</label>
@@ -2351,7 +2405,6 @@ class NimlykoderPanel extends LitElement {
                             </div>
                             <small>${this.t("dialog.start_hint")}</small>
                         </div>
-                        ${this._renderLockPicker(this.editLocks, (id, on) => this._toggleEditLock(id, on))}
                         <div class="form-group" style="border-top: 1px solid var(--divider); padding-top: 16px; margin-top: 16px;">
                             <label for="edit-pin">${this.t("dialog.change_pin")}</label>
                             <input type="text" id="edit-pin" placeholder="${this.t("dialog.pin_placeholder")}" pattern="[0-9]{4,6}" maxlength="6" inputmode="numeric" @input=${() => this.editFormError = null} />
@@ -2436,7 +2489,7 @@ class NimlykoderPanel extends LitElement {
 
     async _openAddDialog() {
         // New people default to every lock; the picker (multi-lock only) narrows it.
-        this.addLocks = this.locks.map((l) => l.entry_id);
+        this.addLocks = this.loadedLocks.map((l) => l.entry_id);
         this.lockError = false;
         this.showAddDialog = true;
         await this.updateComplete;

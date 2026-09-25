@@ -65,12 +65,17 @@ def lock_title(hass: HomeAssistant, entry_id: str) -> str:
 
 
 def resolve_locks(
-    hass: HomeAssistant, locks: list[str] | None, allow_empty: bool = False
+    hass: HomeAssistant,
+    locks: list[str] | None,
+    allow_empty: bool = False,
+    allow_unloaded: bool = False,
 ) -> list[str]:
     """Turn a list of entry_ids and/or lock entity_ids into entry_ids.
 
-    None/empty falls back to the original lock (so callers that never heard
-    of multiple locks keep working) unless `allow_empty` is set.
+    None falls back to the original lock (so callers that never heard of
+    multiple locks keep working). With `allow_unloaded`, configured locks that
+    failed to load are accepted too — used to keep a person's existing access
+    to a lock that is temporarily down.
     """
     entries = loaded_entries(hass)
     if locks is None:
@@ -83,9 +88,14 @@ def resolve_locks(
     by_entity = {
         d["config"][CONF_LOCK_ENTITY]: eid for eid, d in entries.items()
     }
+    configured = (
+        {e.entry_id for e in hass.config_entries.async_entries(DOMAIN)}
+        if allow_unloaded
+        else set()
+    )
     resolved: list[str] = []
     for lock in locks:
-        entry_id = lock if lock in entries else by_entity.get(lock)
+        entry_id = lock if lock in entries or lock in configured else by_entity.get(lock)
         if entry_id is None:
             raise HomeAssistantError(f"Unknown lock: {lock}")
         if entry_id not in resolved:

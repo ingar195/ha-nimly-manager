@@ -112,6 +112,7 @@
     "start_hint": "Leave empty to activate immediately. If set in the future, the code won't work at the lock until this date.",
     "locks": "Locks",
     "locks_hint": "This person can open the selected locks, using the same slot on each.",
+    "lock_unavailable": "not loaded",
     "slot": "Slot",
     "next_available": "Next available",
     "suggested_slot": "Suggested Slot",
@@ -159,6 +160,10 @@
 
   "lock_select": {
     "title": "Lock shown below"
+  },
+
+  "lock_unavailable": {
+    "banner": "Lock \"{title}\" is not loaded (state: {state}). Its people can't be changed until it is — check Settings → Devices & Services → Nimlykoder."
   },
 
   "sync": {

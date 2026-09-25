@@ -290,18 +290,23 @@ async def handle_resync(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
 @websocket_api.async_response
 @_guarded("entries_failed")
 async def handle_entries(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
-    """The loaded locks, original first."""
+    """Every configured lock, original first. `loaded` is False for a lock
+    that failed to set up (so the panel can say so instead of hiding it)."""
     loaded = loaded_entries(hass)
     locks = []
     for config_entry in hass.config_entries.async_entries(DOMAIN):
         data = loaded.get(config_entry.entry_id)
-        if data is None:
-            continue
         locks.append(
             {
                 "entry_id": config_entry.entry_id,
                 "title": config_entry.title,
-                "lock_entity": data["config"].get(CONF_LOCK_ENTITY),
+                "lock_entity": (
+                    data["config"].get(CONF_LOCK_ENTITY)
+                    if data
+                    else config_entry.options.get(CONF_LOCK_ENTITY)
+                ),
+                "loaded": data is not None,
+                "state": str(getattr(config_entry.state, "value", config_entry.state)),
             }
         )
     return {"locks": locks}

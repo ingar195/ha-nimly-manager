@@ -23,6 +23,7 @@ from .helpers import (
     get_entry_data,
     get_users,
     loaded_entries,
+    lock_title,
     overwrite_protection,
     resolve_locks,
     slot_range,
@@ -225,11 +226,17 @@ async def async_update_locks(
 ) -> CodeEntry:
     """Change which locks a user can open (programs added, clears removed)."""
     entry = _get_user(hass, slot)
-    new_ids = resolve_locks(hass, locks)
-    for lock_id in new_ids:
-        check_slot_bounds(hass, slot, [lock_id])
-
+    # Locks that failed to load can stay (existing access), but can't be added.
+    new_ids = resolve_locks(hass, locks, allow_unloaded=True)
+    loaded = loaded_entries(hass)
     added = [l for l in new_ids if l not in entry.locks]
+    for lock_id in added:
+        if lock_id not in loaded:
+            raise HomeAssistantError(f"{lock_title(hass, lock_id)} is not loaded")
+    for lock_id in new_ids:
+        if lock_id in loaded:
+            check_slot_bounds(hass, slot, [lock_id])
+
     removed = _reachable(hass, [l for l in entry.locks if l not in new_ids])
 
     if added and entry.activated:

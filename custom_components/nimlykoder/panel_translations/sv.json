@@ -53,6 +53,7 @@
     "start_hint": "Lämna tomt för att aktivera direkt. Om det sätts i framtiden fungerar koden inte i låset förrän detta datum.",
     "locks": "Lås",
     "locks_hint": "Personen kan öppna de valda låsen och använder samma plats på varje lås.",
+    "lock_unavailable": "inte laddat",
     "slot": "Plats",
     "next_available": "Nästa lediga",
     "suggested_slot": "Föreslagen plats",
@@ -70,6 +71,9 @@
   },
   "lock_select": {
     "title": "Lås som visas nedan"
+  },
+  "lock_unavailable": {
+    "banner": "Låset \"{title}\" är inte laddat (status: {state}). Dess personer kan inte ändras förrän det är laddat — kontrollera Inställningar → Enheter & tjänster → Nimlykoder."
   },
   "sync": {
     "button": "Synka alla lås",
