@@ -44,6 +44,14 @@ class NimlykoderPanel extends LitElement {
             // Logbook
             logbookEntries: { type: Array },
             logbookLoading: { type: Boolean },
+            // Multi-lock: all locks, the one shown in the header, sync state
+            locks: { type: Array },
+            selectedLockId: { type: String },
+            syncing: { type: Boolean },
+            syncResult: { type: Array },
+            addLocks: { type: Array },
+            editLocks: { type: Array },
+            lockError: { type: Boolean },
         };
     }
 
@@ -82,6 +90,14 @@ class NimlykoderPanel extends LitElement {
         // Logbook
         this.logbookEntries = [];
         this.logbookLoading = false;
+        // Multi-lock
+        this.locks = [];
+        this.selectedLockId = null;
+        this.syncing = false;
+        this.syncResult = null;
+        this.addLocks = [];
+        this.editLocks = [];
+        this.lockError = false;
     }
 
     // Default English translations (fallback)
@@ -131,6 +147,8 @@ class NimlykoderPanel extends LitElement {
                 permanent_no_expiry: "Permanent codes do not have an expiry date.",
                 start: "Start Date",
                 start_hint: "Leave empty to activate immediately. If set in the future, the code won't work at the lock until this date.",
+                locks: "Locks",
+                locks_hint: "This person can open the selected locks, using the same slot on each.",
                 slot: "Slot",
                 next_available: "Next available",
                 cancel: "Cancel",
@@ -141,6 +159,21 @@ class NimlykoderPanel extends LitElement {
             errors: {
                 name_required: "Name is required",
                 pin_invalid: "PIN code must be 4-6 digits",
+                lock_required: "Select at least one lock",
+            },
+            lock_select: {
+                title: "Lock shown below",
+            },
+            sync: {
+                button: "Sync all locks",
+                syncing: "Syncing...",
+                hint: "Make every lock match this list: write each person's PIN to the locks they can open and clear it from the others",
+                done: "Sync finished",
+                pushed: "{n} written",
+                removed: "{n} cleared",
+                failed_slots: "failed: slot {slots}",
+                failed: "Sync failed: {error}",
+                dismiss: "Dismiss",
             },
             empty: {
                 title: "No PIN codes yet",
@@ -222,6 +255,74 @@ class NimlykoderPanel extends LitElement {
                 margin-left: 8px;
                 flex: 1;
             }
+
+            /* Lock selector (only rendered with more than one lock) */
+            .lock-select {
+                max-width: 220px;
+                margin-left: 4px;
+                padding: 6px 28px 6px 12px;
+                border: 1px solid rgba(255, 255, 255, 0.4);
+                border-radius: 16px;
+                background: rgba(255, 255, 255, 0.15);
+                color: inherit;
+                font-size: 14px;
+                font-weight: 500;
+                cursor: pointer;
+                outline: none;
+            }
+
+            .lock-select option {
+                color: var(--text-primary);
+                background: var(--card-bg);
+            }
+
+            .lock-chip {
+                display: inline-flex;
+                align-items: center;
+                padding: 1px 8px;
+                border-radius: 10px;
+                font-size: 12px;
+                background: rgba(3, 169, 244, 0.12);
+                color: var(--primary-color);
+            }
+
+            .lock-picker {
+                display: flex;
+                flex-direction: column;
+                gap: 6px;
+                max-height: 140px;
+                overflow-y: auto;
+            }
+
+            .form-group .lock-option {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                margin: 0;
+                font-weight: 400;
+                cursor: pointer;
+            }
+
+            .form-group .lock-option input {
+                width: auto;
+                padding: 0;
+                margin: 0;
+            }
+
+            .info-banner {
+                background: rgba(3, 169, 244, 0.12);
+                color: var(--text-primary);
+                padding: 12px 16px;
+                border-radius: 8px;
+                margin-bottom: 16px;
+                font-size: 14px;
+                display: flex;
+                align-items: flex-start;
+                gap: 12px;
+            }
+
+            .info-banner .sync-lines { flex: 1; }
+            .info-banner .sync-fail { color: #c62828; font-weight: 500; }
 
             .header-actions {
                 display: flex;
@@ -1143,9 +1244,52 @@ class NimlykoderPanel extends LitElement {
         super.connectedCallback();
         this.loadTranslations();
         this.loadCodes();
+        this._init();
+        this._logbookTimer = setInterval(() => this.loadLogbook(), 30000);
+    }
+
+    // Lock list first: config/logbook/settings belong to the selected lock.
+    async _init() {
+        await this.loadLocks();
         this.loadConfig();
         this.loadLogbook();
-        this._logbookTimer = setInterval(() => this.loadLogbook(), 30000);
+    }
+
+    async loadLocks() {
+        try {
+            const result = await this.hass.callWS({ type: "nimlykoder/entries" });
+            this.locks = result.locks || [];
+        } catch (err) {
+            console.error("Failed to load locks:", err);
+            this.locks = [];
+        }
+        let saved = null;
+        try { saved = localStorage.getItem("nimlykoder_lock"); } catch (e) { /* storage unavailable */ }
+        const known = (id) => this.locks.some((l) => l.entry_id === id);
+        this.selectedLockId = known(this.selectedLockId) ? this.selectedLockId
+            : known(saved) ? saved
+            : (this.locks[0] ? this.locks[0].entry_id : null);
+    }
+
+    _onLockSelected(e) {
+        this.selectedLockId = e.target.value;
+        try { localStorage.setItem("nimlykoder_lock", this.selectedLockId); } catch (err) { /* storage unavailable */ }
+        this.config = { ...this.config, lock_entity: "" };
+        this.logbookEntries = [];
+        this.loadConfig();
+        this.loadLogbook();
+    }
+
+    // Lock-specific commands carry the selected lock (omitted = original lock).
+    _lockMsg(msg) {
+        return this.selectedLockId ? { ...msg, entry_id: this.selectedLockId } : msg;
+    }
+
+    get multiLock() { return this.locks.length > 1; }
+
+    _lockTitle(entryId) {
+        const lock = this.locks.find((l) => l.entry_id === entryId);
+        return lock ? lock.title : entryId;
     }
 
     disconnectedCallback() {
@@ -1171,7 +1315,7 @@ class NimlykoderPanel extends LitElement {
 
     async loadConfig() {
         try {
-            const result = await this.hass.callWS({ type: "nimlykoder/config" });
+            const result = await this.hass.callWS(this._lockMsg({ type: "nimlykoder/config" }));
             this.config = result;
             this.autoLockEnabled = result.auto_lock_enabled || false;
             this.autoLockDelay = result.auto_lock_delay || 300;
@@ -1196,7 +1340,7 @@ class NimlykoderPanel extends LitElement {
     async loadLogbook() {
         try {
             this.logbookLoading = true;
-            const result = await this.hass.callWS({ type: "nimlykoder/activity" });
+            const result = await this.hass.callWS(this._lockMsg({ type: "nimlykoder/activity" }));
             this.logbookEntries = result.entries || [];
             this.logbookLoading = false;
         } catch (err) {
@@ -1441,6 +1585,13 @@ class NimlykoderPanel extends LitElement {
                         <path d="M3,6H21V8H3V6M3,11H21V13H3V11M3,16H21V18H3V16Z"/>
                     </svg>
                 </button>
+                ${this.multiLock ? html`
+                    <select class="lock-select" @change=${this._onLockSelected} title="${this.t("lock_select.title")}">
+                        ${this.locks.map((l) => html`
+                            <option value="${l.entry_id}" ?selected=${l.entry_id === this.selectedLockId}>${l.title}</option>
+                        `)}
+                    </select>
+                ` : ""}
                 <div class="app-header-title">${this.t("title")}</div>
                 <div class="header-actions">
                     ${this._renderBatteryBadge()}
@@ -1603,12 +1754,53 @@ class NimlykoderPanel extends LitElement {
                         @input=${(e) => (this.searchQuery = e.target.value)}
                     />
                 </div>
+                ${this.multiLock ? html`
+                    <button class="btn btn-secondary" ?disabled=${this.syncing} @click=${this._syncAllLocks}
+                        title="${this.t("sync.hint")}">
+                        <svg viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12,18A6,6 0 0,1 6,12C6,11 6.25,10.03 6.7,9.2L5.24,7.74C4.46,8.97 4,10.43 4,12A8,8 0 0,0 12,20V23L16,19L12,15M12,4V1L8,5L12,9V6A6,6 0 0,1 18,12C18,13 17.75,13.97 17.3,14.8L18.76,16.26C19.54,15.03 20,13.57 20,12A8,8 0 0,0 12,4Z"/>
+                        </svg>
+                        ${this.syncing ? this.t("sync.syncing") : this.t("sync.button")}
+                    </button>
+                ` : ""}
                 <button class="btn btn-primary" @click=${() => this._openAddDialog()}>
                     <svg viewBox="0 0 24 24" fill="currentColor">
                         <path d="M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z"/>
                     </svg>
                     ${this.t("add_code")}
                 </button>
+            </div>
+            ${this._renderSyncResult()}
+        `;
+    }
+
+    async _syncAllLocks() {
+        this.syncing = true;
+        this.syncResult = null;
+        try {
+            const result = await this.hass.callWS({ type: "nimlykoder/resync" });
+            this.syncResult = result.locks || [];
+            await this.loadCodes();
+        } catch (err) {
+            this.error = this.t("sync.failed", { error: err.message });
+        }
+        this.syncing = false;
+    }
+
+    _renderSyncResult() {
+        if (!this.syncResult) return "";
+        return html`
+            <div class="info-banner">
+                <div class="sync-lines">
+                    <strong>${this.t("sync.done")}</strong>
+                    ${this.syncResult.map((l) => html`
+                        <div>
+                            ${l.title}: ${this.t("sync.pushed", { n: l.pushed })}, ${this.t("sync.removed", { n: l.removed })}
+                            ${l.failed.length ? html`<span class="sync-fail"> — ${this.t("sync.failed_slots", { slots: l.failed.join(", ") })}</span>` : ""}
+                        </div>
+                    `)}
+                </div>
+                <button class="btn btn-text" @click=${() => { this.syncResult = null; }}>${this.t("sync.dismiss")}</button>
             </div>
         `;
     }
@@ -1665,13 +1857,16 @@ class NimlykoderPanel extends LitElement {
                                 ${code.activated === false ? this.t("starts") : this.t("started")} ${this.formatDate(code.start)}
                             </span>
                         ` : ""}
+                        ${this.multiLock ? (code.locks || []).map((id) => html`
+                            <span class="lock-chip">${this._lockTitle(id)}</span>
+                        `) : ""}
                     </div>
                 </div>
                 <span class="badge ${this.getBadgeClass(code)}">${this.getBadgeText(code)}</span>
                 <div class="person-actions">
                     <button
                         class="btn btn-icon btn-secondary"
-                        @click=${() => { this.editingCode = code; this.showEditDialog = true; }}
+                        @click=${() => { this.editingCode = code; this.editLocks = [...(code.locks || [])]; this.lockError = false; this.showEditDialog = true; }}
                         title="${this.t("dialog.edit_title")}"
                     >
                         <svg viewBox="0 0 24 24" fill="currentColor">
@@ -1820,7 +2015,7 @@ class NimlykoderPanel extends LitElement {
         this.lockSettingsError = null;
         this.requestUpdate();
         try {
-            const result = await this.hass.callWS({ type: "nimlykoder/get_lock_settings" });
+            const result = await this.hass.callWS(this._lockMsg({ type: "nimlykoder/get_lock_settings" }));
             this.lockSettings = { ...result.settings };
         } catch (err) {
             this.lockSettingsError = this.t("lock_settings.read_error", { error: err.message });
@@ -1840,7 +2035,7 @@ class NimlykoderPanel extends LitElement {
         for (const [name, value] of Object.entries(ls)) {
             if (value === undefined || value === null) continue;
             try {
-                await this.hass.callWS({ type: "nimlykoder/set_lock_setting", setting: name, value });
+                await this.hass.callWS(this._lockMsg({ type: "nimlykoder/set_lock_setting", setting: name, value }));
             } catch (err) {
                 errors.push(`${name}: ${err.message}`);
             }
@@ -1947,11 +2142,11 @@ class NimlykoderPanel extends LitElement {
         this._autoLockSaving = true;
         this.requestUpdate();
         try {
-            await this.hass.callWS({
+            await this.hass.callWS(this._lockMsg({
                 type: "nimlykoder/set_auto_lock",
                 enabled: this.autoLockEnabled,
                 delay: this.autoLockDelay,
-            });
+            }));
             this.showAutoLockDialog = false;
         } catch (err) {
             this.error = this.t("errors.auto_lock_save_failed", {error: err.message});
@@ -2002,6 +2197,58 @@ class NimlykoderPanel extends LitElement {
         `;
     }
 
+    // Which locks a person can open. Hidden with a single lock.
+    _renderLockPicker(selected, onToggle) {
+        if (!this.multiLock) return "";
+        return html`
+            <div class="form-group">
+                <label>${this.t("dialog.locks")}</label>
+                <div class="lock-picker">
+                    ${this.locks.map((l) => html`
+                        <label class="lock-option">
+                            <input type="checkbox"
+                                .checked=${selected.includes(l.entry_id)}
+                                @change=${(e) => onToggle(l.entry_id, e.target.checked)} />
+                            ${l.title}
+                        </label>
+                    `)}
+                </div>
+                ${this.lockError ? html`<small class="field-error">${this.t("errors.lock_required")}</small>` : html`<small>${this.t("dialog.locks_hint")}</small>`}
+            </div>
+        `;
+    }
+
+    _withLock(list, id, on) {
+        const rest = list.filter((x) => x !== id);
+        return on ? [...rest, id] : rest;
+    }
+
+    _toggleAddLock(id, on) {
+        this.addLocks = this._withLock(this.addLocks, id, on);
+        this.lockError = false;
+        this._refreshSuggestedSlot();
+    }
+
+    _toggleEditLock(id, on) {
+        this.editLocks = this._withLock(this.editLocks, id, on);
+        this.lockError = false;
+    }
+
+    async _refreshSuggestedSlot() {
+        const typeEl = this.shadowRoot.getElementById("add-type");
+        const codeType = typeEl ? typeEl.value : "permanent";
+        if (this.addLocks.length === 0) { this.suggestedSlot = null; return; }
+        try {
+            const result = await this.hass.callWS({
+                type: "nimlykoder/suggest_slots", count: 1, code_type: codeType, locks: this.addLocks,
+            });
+            this.suggestedSlot = result.slots && result.slots.length > 0 ? result.slots[0] : null;
+        } catch (err) {
+            console.error("Failed to fetch suggested slot:", err);
+            this.suggestedSlot = null;
+        }
+    }
+
     _renderAddDialog() {
         return html`
             <div class="dialog-overlay" @click=${this._closeAddDialog}>
@@ -2038,6 +2285,7 @@ class NimlykoderPanel extends LitElement {
                                 <small>${this.t("dialog.next_available")}: ${this.suggestedSlot !== null ? this.suggestedSlot : "..."}</small>
                             </div>
                         </div>
+                        ${this._renderLockPicker(this.addLocks, (id, on) => this._toggleAddLock(id, on))}
                         <div class="form-group" id="expiry-group" style="display: none;">
                             <label for="add-expiry">${this.t("dialog.expiry")}</label>
                             <div class="form-row">
@@ -2103,6 +2351,7 @@ class NimlykoderPanel extends LitElement {
                             </div>
                             <small>${this.t("dialog.start_hint")}</small>
                         </div>
+                        ${this._renderLockPicker(this.editLocks, (id, on) => this._toggleEditLock(id, on))}
                         <div class="form-group" style="border-top: 1px solid var(--divider); padding-top: 16px; margin-top: 16px;">
                             <label for="edit-pin">${this.t("dialog.change_pin")}</label>
                             <input type="text" id="edit-pin" placeholder="${this.t("dialog.pin_placeholder")}" pattern="[0-9]{4,6}" maxlength="6" inputmode="numeric" @input=${() => this.editFormError = null} />
@@ -2181,21 +2430,21 @@ class NimlykoderPanel extends LitElement {
         if (expiryGroup) {
             expiryGroup.style.display = e.target.value === "guest" ? "block" : "none";
         }
+        // Guest codes live in their own slot range
+        this._refreshSuggestedSlot();
     }
 
     async _openAddDialog() {
-        try {
-            const result = await this.hass.callWS({ type: "nimlykoder/suggest_slots", count: 1 });
-            this.suggestedSlot = result.slots && result.slots.length > 0 ? result.slots[0] : null;
-        } catch (err) {
-            console.error("Failed to fetch suggested slot:", err);
-            this.suggestedSlot = null;
-        }
+        // New people default to every lock; the picker (multi-lock only) narrows it.
+        this.addLocks = this.locks.map((l) => l.entry_id);
+        this.lockError = false;
         this.showAddDialog = true;
+        await this.updateComplete;
+        await this._refreshSuggestedSlot();
     }
 
-    _closeAddDialog() { this.showAddDialog = false; this.suggestedSlot = null; }
-    _closeEditDialog() { this.showEditDialog = false; this.editingCode = null; this.editFormError = null; }
+    _closeAddDialog() { this.showAddDialog = false; this.suggestedSlot = null; this.lockError = false; }
+    _closeEditDialog() { this.showEditDialog = false; this.editingCode = null; this.editFormError = null; this.lockError = false; }
     _closeRemoveDialog() { this.showRemoveDialog = false; this.removingCode = null; }
 
     async _handleAddSubmit() {
@@ -2217,7 +2466,10 @@ class NimlykoderPanel extends LitElement {
             return;
         }
 
+        if (this.multiLock && this.addLocks.length === 0) { this.lockError = true; return; }
+
         const data = { name, pin_code: pinCode, code_type: codeType };
+        if (this.addLocks.length > 0) data.locks = this.addLocks;
         if (expiry) data.expiry = expiry;
         if (start) data.start = start;
         if (slot) data.slot = parseInt(slot);
@@ -2245,6 +2497,7 @@ class NimlykoderPanel extends LitElement {
 
         if (!name || !name.trim()) { this.editFormError = "name_required"; return; }
         if (newPin && !/^[0-9]{4,6}$/.test(newPin)) { this.editFormError = "pin_invalid"; return; }
+        if (this.multiLock && this.editLocks.length === 0) { this.lockError = true; return; }
 
         try {
             if (name !== this.editingCode.name) {
@@ -2259,6 +2512,12 @@ class NimlykoderPanel extends LitElement {
             const currentStart = this.editingCode.start || "";
             if (start !== currentStart) {
                 await this.hass.callWS({ type: "nimlykoder/update_start", slot: this.editingCode.slot, start: start || null });
+            }
+            if (this.multiLock) {
+                const before = [...(this.editingCode.locks || [])].sort().join(",");
+                if ([...this.editLocks].sort().join(",") !== before) {
+                    await this.hass.callWS({ type: "nimlykoder/update_locks", slot: this.editingCode.slot, locks: this.editLocks });
+                }
             }
             if (newPin) {
                 this.pendingPinUpdate = { slot: this.editingCode.slot, name: name.trim(), pin_code: newPin };

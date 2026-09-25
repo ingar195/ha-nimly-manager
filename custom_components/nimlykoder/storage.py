@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -51,6 +51,7 @@ class CodeEntry:
     pin: str | None = None
     start: str | None = None
     activated: bool = True
+    locks: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary.
@@ -77,11 +78,12 @@ class CodeEntry:
             # Entries written before this field existed had no concept of a
             # pending start — treat them as already active.
             activated=data.get("activated", True),
+            locks=list(data.get("locks", [])),
         )
 
 
 class NimlykoderStorage:
-    """Manage persistent storage for PIN codes."""
+    """Manage persistent storage for the shared user list (all locks)."""
 
     def __init__(self, hass: HomeAssistant) -> None:
         """Initialize storage."""
@@ -89,8 +91,12 @@ class NimlykoderStorage:
         self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
         self._data: dict[str, dict[str, Any]] = {}
 
-    async def async_load(self) -> None:
-        """Load data from storage."""
+    async def async_load(self, default_lock: str | None = None) -> None:
+        """Load data from storage.
+
+        Entries saved before multi-lock support have no `locks`; they belong
+        to the original (first) lock, `default_lock`.
+        """
         data = await self._store.async_load()
         if data is None:
             self._data = {}
@@ -101,6 +107,16 @@ class NimlykoderStorage:
             else:
                 _LOGGER.warning("Unknown storage version, resetting data")
                 self._data = {}
+        if default_lock:
+            migrated = False
+            for entry_data in self._data.values():
+                if "locks" not in entry_data:
+                    entry_data["locks"] = [default_lock]
+                    migrated = True
+            if migrated:
+                # Persist right away so the assignment can't drift if the
+                # "first lock" changes later (e.g. it gets removed).
+                await self.async_save()
 
     async def async_save(self) -> None:
         """Save data to storage."""
@@ -142,6 +158,7 @@ class NimlykoderStorage:
         expiry: str | None = None,
         pin: str | None = None,
         start: str | None = None,
+        locks: list[str] | None = None,
     ) -> CodeEntry:
         """Add a new entry.
 
@@ -173,6 +190,7 @@ class NimlykoderStorage:
             "pin": pin,
             "start": start,
             "activated": activated,
+            "locks": list(locks or []),
         }
 
         self._data[slot_str] = entry_data
@@ -251,6 +269,26 @@ class NimlykoderStorage:
                 pending.append(int(slot_str))
         return pending
 
+    async def update_locks(self, slot: int, locks: list[str]) -> CodeEntry:
+        """Replace the set of locks a user has access to."""
+        slot_str = str(slot)
+        if slot_str not in self._data:
+            raise HomeAssistantError(f"Slot {slot} not found")
+        self._data[slot_str]["locks"] = list(locks)
+        self._data[slot_str]["updated"] = datetime.now().isoformat()
+        await self.async_save()
+        return CodeEntry.from_dict(slot, self._data[slot_str])
+
+    async def strip_lock(self, lock_id: str) -> None:
+        """Remove a (deleted) lock from every user's access list."""
+        changed = False
+        for data in self._data.values():
+            if lock_id in data.get("locks", []):
+                data["locks"] = [l for l in data["locks"] if l != lock_id]
+                changed = True
+        if changed:
+            await self.async_save()
+
     async def mark_activated(self, slot: int) -> None:
         """Mark a scheduled-start entry as activated (PIN now on the lock)."""
         slot_str = str(slot)
@@ -271,20 +309,25 @@ class NimlykoderStorage:
 
         return CodeEntry.from_dict(slot, self._data[slot_str])
 
-    def find_by_pin(self, pin: str, now: datetime | None = None) -> CodeEntry | None:
+    def find_by_pin(
+        self, pin: str, lock_id: str | None = None, now: datetime | None = None
+    ) -> CodeEntry | None:
         """Find a currently-valid entry whose stored PIN matches.
 
         Expired guest codes don't count as a match, so a PIN typed on a
         code that's since expired is treated the same as an unknown PIN.
         Same for a code with a scheduled start that hasn't arrived yet —
         its PIN was never actually pushed to the physical lock, so it
-        should be treated the same as an unknown PIN too.
+        should be treated the same as an unknown PIN too. With `lock_id`,
+        only users who have access to that lock match.
         """
         now = now or datetime.now()
         for slot_str, data in self._data.items():
             if data.get("pin") != pin:
                 continue
             if not data.get("activated", True):
+                continue
+            if lock_id is not None and lock_id not in data.get("locks", []):
                 continue
             entry = CodeEntry.from_dict(int(slot_str), data)
             if entry.type == TYPE_GUEST and entry.expiry:

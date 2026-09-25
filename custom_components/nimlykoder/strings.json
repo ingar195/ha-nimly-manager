@@ -33,7 +33,7 @@
       "invalid_slot_range": "Minimum slot must be less than maximum slot"
     },
     "abort": {
-      "already_configured": "Nimlykoder is already configured"
+      "already_configured": "This lock is already configured"
     }
   },
   "options": {

@@ -70,6 +70,8 @@ SERVICE_UPDATE_NAME = "update_name"
 SERVICE_UPDATE_PIN = "update_pin"
 SERVICE_LIST_CODES = "list_codes"
 SERVICE_CLEANUP_EXPIRED = "cleanup_expired"
+SERVICE_UPDATE_LOCKS = "update_locks"
+SERVICE_RESYNC = "resync"
 
 # WebSocket commands
 WS_TYPE_LIST = "nimlykoder/list"
@@ -86,6 +88,9 @@ WS_TYPE_SET_AUTO_LOCK = "nimlykoder/set_auto_lock"
 WS_TYPE_ACTIVITY = "nimlykoder/activity"
 WS_TYPE_GET_LOCK_SETTINGS = "nimlykoder/get_lock_settings"
 WS_TYPE_SET_LOCK_SETTING = "nimlykoder/set_lock_setting"
+WS_TYPE_ENTRIES = "nimlykoder/entries"
+WS_TYPE_UPDATE_LOCKS = "nimlykoder/update_locks"
+WS_TYPE_RESYNC = "nimlykoder/resync"
 
 # Auto-lock options (stored in nimlykoder config entry options)
 OPT_AUTO_LOCK_ENABLED = "auto_lock_enabled"

@@ -58,6 +58,7 @@ from .scheduler import (
     async_activate_slot,
     async_expire_slot,
 )
+from .helpers import loaded_entries
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -240,8 +241,10 @@ def _get_zha_ieee_from_entity(hass: HomeAssistant, entity_id: str) -> str | None
 
 
 def _cancel_auto_lock(hass: HomeAssistant, entry_id: str) -> None:
-    """Cancel any running auto-lock timer."""
-    data = hass.data.get(DOMAIN, {})
+    """Cancel any running auto-lock timer for this lock."""
+    data = loaded_entries(hass).get(entry_id)
+    if not data:
+        return
     task = data.get("auto_lock_task")
     if task and not task.done():
         task.cancel()
@@ -251,7 +254,10 @@ def _cancel_auto_lock(hass: HomeAssistant, entry_id: str) -> None:
 def _schedule_auto_lock(hass: HomeAssistant, entry: ConfigEntry, delay: int) -> None:
     """Start a delayed lock command, cancelling any previous timer."""
     _cancel_auto_lock(hass, entry.entry_id)
-    lock_entity = hass.data[DOMAIN]["config"].get(CONF_LOCK_ENTITY)
+    data = loaded_entries(hass).get(entry.entry_id)
+    if not data:
+        return
+    lock_entity = data["config"].get(CONF_LOCK_ENTITY)
 
     async def _do_lock() -> None:
         try:
@@ -265,7 +271,7 @@ def _schedule_auto_lock(hass: HomeAssistant, entry: ConfigEntry, delay: int) -> 
             pass
 
     task = hass.async_create_task(_do_lock())
-    hass.data[DOMAIN]["auto_lock_task"] = task
+    data["auto_lock_task"] = task
 
 
 # Byte layout of the nimly_last_lock_unlock_source bitmap32 attribute (0x0100),
@@ -307,15 +313,27 @@ _ATTR_LOCK_ACTIVITY = 0x0100
 _ATTR_LAST_PIN_CODE = 0x0101
 
 
-def _process_activity_event(hass: HomeAssistant, attr_id: int, value) -> None:
-    """Dispatch a DoorLock attribute report to the right handler."""
+def _process_activity_event(
+    hass: HomeAssistant, data: dict, attr_id: int, value
+) -> None:
+    """Dispatch a DoorLock attribute report (from one lock) to the right handler."""
     if attr_id == _ATTR_LOCK_ACTIVITY:
-        _process_lock_activity_event(hass, value)
+        _process_lock_activity_event(hass, data, value)
     elif attr_id == _ATTR_LAST_PIN_CODE:
-        _process_pin_entry_event(hass, value)
+        _process_pin_entry_event(hass, data, value)
 
 
-def _process_lock_activity_event(hass: HomeAssistant, value) -> None:
+def _wrong_pin_payload(data: dict, ts: str, source: str) -> dict:
+    """Event payload for a wrong PIN: which lock, but never which code."""
+    return {
+        "ts": ts,
+        "source": source,
+        "entry_id": data["entry"].entry_id,
+        "lock_entity": data["config"].get(CONF_LOCK_ENTITY),
+    }
+
+
+def _process_lock_activity_event(hass: HomeAssistant, data: dict, value) -> None:
     """Decode a nimly_last_lock_unlock_source report and append it to the activity log."""
     from homeassistant.util.dt import utcnow
 
@@ -345,7 +363,7 @@ def _process_lock_activity_event(hass: HomeAssistant, value) -> None:
         user_slot, action, source,
     )
 
-    nimlykoder_data = hass.data.get(DOMAIN, {})
+    nimlykoder_data = data
 
     # Persist the raw report + the decoded fields, independent of the
     # activity log, as a diagnostic trail.
@@ -367,13 +385,15 @@ def _process_lock_activity_event(hass: HomeAssistant, value) -> None:
 
     if action in ("failed_lock", "failed_unlock"):
         # No slot/user/name in the payload — don't expose which code was guessed.
-        hass.bus.async_fire(EVENT_WRONG_PIN_ATTEMPT, {"ts": ts, "source": source})
+        hass.bus.async_fire(
+            EVENT_WRONG_PIN_ATTEMPT, _wrong_pin_payload(data, ts, source)
+        )
 
     user_name = None
     storage = nimlykoder_data.get("storage")
     if storage and user_slot > 0:
         code_entry = storage.get(user_slot)
-        if code_entry:
+        if code_entry and data["entry"].entry_id in code_entry.locks:
             user_name = code_entry.name
 
     activity = {
@@ -395,7 +415,7 @@ def _process_lock_activity_event(hass: HomeAssistant, value) -> None:
         hass.async_create_task(activity_store.async_save({"entries": log}))
 
 
-def _process_pin_entry_event(hass: HomeAssistant, value) -> None:
+def _process_pin_entry_event(hass: HomeAssistant, data: dict, value) -> None:
     """Check a nimly_last_pin_code report against known codes.
 
     The bytes are BCD-packed (two decimal digits per byte), so `.hex()`
@@ -412,19 +432,22 @@ def _process_pin_entry_event(hass: HomeAssistant, value) -> None:
     if not entered_pin:
         return
 
-    nimlykoder_data = hass.data.get(DOMAIN, {})
+    nimlykoder_data = data
     storage = nimlykoder_data.get("storage")
     if storage is None:
         return
 
-    if storage.find_by_pin(entered_pin) is not None:
+    # Only users with access to *this* lock count as a match here.
+    if storage.find_by_pin(entered_pin, data["entry"].entry_id) is not None:
         return  # Matches a known code — the 0x0100 report covers this as a normal unlock.
 
     ts = utcnow().isoformat()
     _LOGGER.debug("NIMLY wrong PIN entered on keypad (%d digits)", len(entered_pin))
 
     # No slot/user/pin in the payload — don't expose which code was guessed.
-    hass.bus.async_fire(EVENT_WRONG_PIN_ATTEMPT, {"ts": ts, "source": "keypad"})
+    hass.bus.async_fire(
+        EVENT_WRONG_PIN_ATTEMPT, _wrong_pin_payload(data, ts, "keypad")
+    )
 
     activity = {
         "ts": ts,
@@ -444,7 +467,9 @@ def _process_pin_entry_event(hass: HomeAssistant, value) -> None:
         hass.async_create_task(activity_store.async_save({"entries": log}))
 
 
-def _register_activity_listener(hass: HomeAssistant, zha_ieee: str, endpoint_id: int):
+def _register_activity_listener(
+    hass: HomeAssistant, data: dict, zha_ieee: str, endpoint_id: int
+):
     """Attach to the DoorLock cluster using both listener APIs for maximum compatibility."""
     cluster = _get_doorlock_cluster(hass, zha_ieee, endpoint_id)
     if cluster is None:
@@ -457,14 +482,14 @@ def _register_activity_listener(hass: HomeAssistant, zha_ieee: str, endpoint_id:
     # --- Method 1: zigpy ListenableMixin — attribute_updated(attr_id, value) ---
     class _AttributeListener:
         def attribute_updated(self, attr_id, value, timestamp=None):
-            _process_activity_event(hass, attr_id, value)
+            _process_activity_event(hass, data, attr_id, value)
 
     listener_obj = _AttributeListener()
     cluster.add_listener(listener_obj)
 
     # --- Method 2: zigpy on_event — fired by some ZHA/zigpy versions ---
     def _on_event(event):
-        _process_activity_event(hass, event.attribute_id, event.raw_value)
+        _process_activity_event(hass, data, event.attribute_id, event.raw_value)
 
     unsub_event = None
     try:
@@ -491,7 +516,9 @@ def _register_activity_listener(hass: HomeAssistant, zha_ieee: str, endpoint_id:
     return _unsub
 
 
-def _setup_door_sensor_listener(hass: HomeAssistant, door_sensor_entity: str):
+def _setup_door_sensor_listener(
+    hass: HomeAssistant, data: dict, door_sensor_entity: str
+):
     """Listen for door open/close events and append them to the activity log."""
     from homeassistant.util.dt import utcnow
 
@@ -514,7 +541,7 @@ def _setup_door_sensor_listener(hass: HomeAssistant, door_sensor_entity: str):
             "slot": None,
             "name": new_state.attributes.get("friendly_name") or door_sensor_entity,
         }
-        nimlykoder_data = hass.data.get(DOMAIN, {})
+        nimlykoder_data = data
         log = nimlykoder_data.get("activity_log", [])
         log.insert(0, activity)
         if len(log) > ACTIVITY_LOG_MAX:
@@ -650,22 +677,49 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         config[CONF_AUTO_EXPIRE],
     )
 
-    # Initialize code storage
-    _LOGGER.debug("[async_setup_entry] Initializing storage...")
-    storage = NimlykoderStorage(hass)
-    await storage.async_load()
+    # Shared state for all locks: the one user list, created by whichever lock
+    # loads first (entries of a domain can set up concurrently, hence the lock).
+    domain_data = hass.data.setdefault(
+        DOMAIN,
+        {
+            "entries": {},
+            "users": None,
+            "slot_timers": {},
+            "init_lock": asyncio.Lock(),
+        },
+    )
+    all_entries = hass.config_entries.async_entries(DOMAIN)
+    original_lock_id = all_entries[0].entry_id if all_entries else entry.entry_id
+    async with domain_data["init_lock"]:
+        if domain_data["users"] is None:
+            _LOGGER.debug("[async_setup_entry] Initializing shared user storage...")
+            users = NimlykoderStorage(hass)
+            # Users saved before multi-lock support belong to the original lock.
+            await users.async_load(default_lock=original_lock_id)
+            domain_data["users"] = users
+    storage = domain_data["users"]
     _LOGGER.info("[async_setup_entry] Storage loaded with %d entries", len(storage.list_entries()))
 
-    # Load persistent activity log
-    activity_store = Store(hass, ACTIVITY_STORAGE_VERSION, ACTIVITY_STORAGE_KEY)
-    activity_data = await activity_store.async_load()
-    activity_log = (activity_data or {}).get("entries", [])
+    # Per-lock persistent logs. The old global files are copied to the
+    # original lock's keys the first time (never deleted).
+    is_original = entry.entry_id == original_lock_id
+
+    async def _load_log(base_key: str, version: int):
+        store = Store(hass, version, f"{base_key}_{entry.entry_id}")
+        loaded = await store.async_load()
+        if loaded is None and is_original:
+            loaded = await Store(hass, version, base_key).async_load()
+        return store, (loaded or {}).get("entries", [])
+
+    activity_store, activity_log = await _load_log(
+        ACTIVITY_STORAGE_KEY, ACTIVITY_STORAGE_VERSION
+    )
     _LOGGER.info("[async_setup_entry] Activity log loaded with %d entries", len(activity_log))
 
-    # Load persistent raw ping log (diagnostic — see _process_activity_event)
-    raw_ping_store = Store(hass, RAW_PING_STORAGE_VERSION, RAW_PING_STORAGE_KEY)
-    raw_ping_data = await raw_ping_store.async_load()
-    raw_ping_log = (raw_ping_data or {}).get("entries", [])
+    # Raw ping log (diagnostic — see _process_activity_event)
+    raw_ping_store, raw_ping_log = await _load_log(
+        RAW_PING_STORAGE_KEY, RAW_PING_STORAGE_VERSION
+    )
     _LOGGER.info("[async_setup_entry] Raw ping log loaded with %d entries", len(raw_ping_log))
 
     # Initialize the code adapter - ZHA (direct ZCL commands) or MQTT/Zigbee2MQTT,
@@ -689,9 +743,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     else:
         _LOGGER.info("[async_setup_entry] Adapter connection verified successfully")
 
-    # Store data
-    hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN] = {
+    # Per-lock runtime data. "storage" is the shared user list (same object
+    # for every lock) so per-lock code can keep using data["storage"].
+    data = {
         "storage": storage,
         "mqtt_adapter": mqtt_adapter,
         "config": config,
@@ -707,30 +761,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "unsub_activity_listener": None,
         "zha_ieee": zha_ieee,
     }
+    domain_data["entries"][entry.entry_id] = data
 
     # Forward to sensor / binary_sensor platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # Register services
-    _LOGGER.debug("[async_setup_entry] Registering services...")
-    await async_setup_services(hass)
-
-    # Register WebSocket handlers
-    async_register_websocket_handlers(hass)
-
-    # Register panel
-    await async_register_panel(hass)
+    # Services, WebSocket handlers and the panel are shared by all locks:
+    # register them once (the first lock to load).
+    if not domain_data.get("registered"):
+        domain_data["registered"] = True
+        _LOGGER.debug("[async_setup_entry] Registering services, websocket, panel...")
+        await async_setup_services(hass)
+        async_register_websocket_handlers(hass)
+        await async_register_panel(hass)
 
     # Set up auto-lock listener if a lock entity is configured
     if lock_entity:
         unsub = _setup_auto_lock_listener(hass, entry, lock_entity)
-        hass.data[DOMAIN]["unsub_lock_listener"] = unsub
+        data["unsub_lock_listener"] = unsub
 
     # Set up door sensor listener if configured
     door_sensor = entry.options.get(CONF_DOOR_SENSOR)
     if door_sensor:
-        unsub_door = _setup_door_sensor_listener(hass, door_sensor)
-        hass.data[DOMAIN]["unsub_door_listener"] = unsub_door
+        unsub_door = _setup_door_sensor_listener(hass, data, door_sensor)
+        data["unsub_door_listener"] = unsub_door
 
     # Set up ZHA activity log listener (ZHA locks only).
     # ZHA device proxies may not be populated yet even after after_dependencies
@@ -742,11 +796,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # activity log, even though ZHA's own entities keep working fine.
     if lock_platform == "zha" and zha_ieee:
         try:
-            unsub_act = _register_activity_listener(hass, zha_ieee, zha_endpoint_id)
+            unsub_act = _register_activity_listener(hass, data, zha_ieee, zha_endpoint_id)
         except Exception as exc:
             _LOGGER.warning("Error registering activity listener: %s", exc)
             unsub_act = None
-        hass.data[DOMAIN]["unsub_activity_listener"] = unsub_act
+        data["unsub_activity_listener"] = unsub_act
         if unsub_act is None:
             # Quick retries at first, then settle into retrying every 60s forever
             # until it either succeeds or the integration is unloaded.
@@ -757,12 +811,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 while True:
                     delay = _RETRY_DELAYS[min(attempt, len(_RETRY_DELAYS) - 1)]
                     await asyncio.sleep(delay)
-                    data = hass.data.get(DOMAIN)
-                    if not data:
-                        return  # integration unloaded
+                    if loaded_entries(hass).get(entry.entry_id) is not data:
+                        return  # this lock was unloaded or reloaded
                     if data.get("unsub_activity_listener"):
                         return  # already registered (e.g. by another path)
-                    unsub = _register_activity_listener(hass, zha_ieee, zha_endpoint_id)
+                    unsub = _register_activity_listener(
+                        hass, data, zha_ieee, zha_endpoint_id
+                    )
                     if unsub is not None:
                         data["unsub_activity_listener"] = unsub
                         _LOGGER.info(
@@ -786,7 +841,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Set up scheduler for expired code cleanup
     if config[CONF_AUTO_EXPIRE]:
         unsub = await async_setup_cleanup_scheduler(hass, config[CONF_CLEANUP_TIME])
-        hass.data[DOMAIN]["cleanup_unsub"] = unsub
+        data["cleanup_unsub"] = unsub
 
     # Schedule exact-time activation/expiry timers for every stored code.
     # Anything whose moment already passed while HA was off fires immediately.
@@ -801,7 +856,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    data = hass.data.get(DOMAIN)
+    domain_data = hass.data.get(DOMAIN)
+    data = domain_data["entries"].pop(entry.entry_id, None) if domain_data else None
     if data:
         # Cancel auto-lock timer
         task = data.get("auto_lock_task")
@@ -827,23 +883,33 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if data.get("cleanup_unsub"):
             data["cleanup_unsub"]()
 
-        # Cancel exact-time start/expiry timers
-        async_cancel_all(hass)
-
     # Unload sensor / binary_sensor platforms
-    await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
-    # Unregister services
-    await async_unload_services(hass)
+    # Only the last lock to unload tears down what all locks share
+    if domain_data is not None and not domain_data["entries"]:
+        async_cancel_all(hass)
+        await async_unload_services(hass)
+        await async_unregister_panel(hass)
+        hass.data.pop(DOMAIN, None)
 
-    # Unregister panel
-    await async_unregister_panel(hass)
+    _LOGGER.info("Nimlykoder lock '%s' unloaded", entry.title)
+    return unload_ok
 
-    # Clean up data
-    hass.data.pop(DOMAIN, None)
 
-    _LOGGER.info("Nimlykoder integration unloaded")
-    return True
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Forget a deleted lock: drop its access from every user and its logs."""
+    domain_data = hass.data.get(DOMAIN)
+    users = domain_data.get("users") if domain_data else None
+    if users is None:
+        users = NimlykoderStorage(hass)
+        await users.async_load()
+    await users.strip_lock(entry.entry_id)
+    for base_key, version in (
+        (ACTIVITY_STORAGE_KEY, ACTIVITY_STORAGE_VERSION),
+        (RAW_PING_STORAGE_KEY, RAW_PING_STORAGE_VERSION),
+    ):
+        await Store(hass, version, f"{base_key}_{entry.entry_id}").async_remove()
 
 
 async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -890,17 +956,14 @@ async def _async_cleanup_expired_codes(hass: HomeAssistant) -> None:
     at startup. This just catches anything that timer missed.
     """
     try:
-        data = hass.data.get(DOMAIN)
-        if not data:
+        domain_data = hass.data.get(DOMAIN)
+        if not domain_data or domain_data.get("users") is None:
             _LOGGER.warning("Nimlykoder data not available for cleanup")
             return
 
-        config = data["config"]
-        if not config.get(CONF_AUTO_EXPIRE, True):
-            _LOGGER.debug("Auto-expire is disabled, skipping cleanup")
-            return
-
-        storage = data["storage"]
+        # Scheduled per lock, and only for locks with auto-expire on, so
+        # being called at all means expiry cleanup is wanted.
+        storage = domain_data["users"]
         expired_slots = storage.expired_guest_slots()
 
         if not expired_slots:
@@ -923,12 +986,12 @@ async def _async_activate_pending_codes(hass: HomeAssistant) -> None:
     at startup. This just catches anything that timer missed.
     """
     try:
-        data = hass.data.get(DOMAIN)
-        if not data:
+        domain_data = hass.data.get(DOMAIN)
+        if not domain_data or domain_data.get("users") is None:
             _LOGGER.warning("Nimlykoder data not available for start-date activation")
             return
 
-        storage = data["storage"]
+        storage = domain_data["users"]
         pending_slots = storage.pending_start_slots()
 
         if not pending_slots:
