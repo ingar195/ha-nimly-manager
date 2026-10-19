@@ -104,10 +104,10 @@ class NimlykoderConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     selector.NumberSelectorConfig(min=1, max=255, mode="box")
                 ),
                 vol.Required(CONF_SLOT_MIN, default=DEFAULT_SLOT_MIN): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=1, max=99, mode="box")
+                    selector.NumberSelectorConfig(min=1, max=999, mode="box")
                 ),
                 vol.Required(CONF_SLOT_MAX, default=DEFAULT_SLOT_MAX): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=0, max=99, mode="box")
+                    selector.NumberSelectorConfig(min=0, max=999, mode="box")
                 ),
                 vol.Required(
                     CONF_RESERVED_SLOTS,
@@ -214,13 +214,13 @@ class NimlykoderOptionsFlow(config_entries.OptionsFlow):
                     CONF_SLOT_MIN,
                     default=slot_min,
                 ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=1, max=99, mode="box")
+                    selector.NumberSelectorConfig(min=1, max=999, mode="box")
                 ),
                 vol.Required(
                     CONF_SLOT_MAX,
                     default=slot_max,
                 ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=0, max=99, mode="box")
+                    selector.NumberSelectorConfig(min=0, max=999, mode="box")
                 ),
                 vol.Required(
                     CONF_RESERVED_SLOTS,
