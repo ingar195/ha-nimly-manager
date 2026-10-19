@@ -2,7 +2,7 @@
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 [![License](https://img.shields.io/github/license/FredrikElliot/ha-nimly-manager.svg)](https://github.com/FredrikElliot/ha-nimly-manager/blob/main/LICENSE)
-[![GitHub Release](https://img.shields.io/github/v/release/FredrikElliot/home-project-ledger)](https://github.com/FredrikElliot/ha-nimly-manager/releases)
+[![GitHub Release](https://img.shields.io/github/v/release/FredrikElliot/ha-nimly-manager)](https://github.com/FredrikElliot/ha-nimly-manager/releases)
 
 A complete HACS integration for managing PIN codes on Nimly smart locks via Zigbee2MQTT.
 
