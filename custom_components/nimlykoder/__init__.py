@@ -44,6 +44,7 @@ from .const import (
     RAW_PING_STORAGE_VERSION,
     RAW_PING_LOG_MAX,
     EVENT_WRONG_PIN_ATTEMPT,
+    EVENT_LOCK_COMMAND_FAILED,
 )
 from .storage import NimlykoderStorage
 from .adapters.mqtt_z2m import MqttZ2mAdapter
@@ -269,6 +270,17 @@ def _schedule_auto_lock(hass: HomeAssistant, entry: ConfigEntry, delay: int) -> 
                 )
         except asyncio.CancelledError:
             pass
+        except Exception as err:
+            _LOGGER.error("Auto-lock command failed for %s: %s", lock_entity, err)
+            hass.bus.async_fire(
+                EVENT_LOCK_COMMAND_FAILED,
+                {
+                    "entry_id": entry.entry_id,
+                    "lock_entity": lock_entity,
+                    "direction": "lock",
+                    "error": str(err),
+                },
+            )
 
     task = hass.async_create_task(_do_lock())
     data["auto_lock_task"] = task

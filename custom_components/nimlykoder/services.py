@@ -18,6 +18,7 @@ from .const import (
     SERVICE_UPDATE_START,
     SERVICE_UPDATE_NAME,
     SERVICE_UPDATE_PIN,
+    SERVICE_SET_ENABLED,
     SERVICE_UPDATE_LOCKS,
     SERVICE_LIST_CODES,
     SERVICE_CLEANUP_EXPIRED,
@@ -33,6 +34,7 @@ from .users import (
     async_cleanup_expired,
     async_remove_user,
     async_resync,
+    async_set_enabled,
     async_update_expiry,
     async_update_locks,
     async_update_pin,
@@ -90,6 +92,13 @@ SERVICE_UPDATE_PIN_SCHEMA = vol.Schema(
     {
         vol.Required("slot"): cv.positive_int,
         vol.Required("pin_code"): cv.string,
+    }
+)
+
+SERVICE_SET_ENABLED_SCHEMA = vol.Schema(
+    {
+        vol.Required("slot"): cv.positive_int,
+        vol.Required("enabled"): cv.boolean,
     }
 )
 
@@ -152,6 +161,10 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
     async def handle_update_pin(call: ServiceCall) -> None:
         await async_update_pin(hass, call.data["slot"], call.data["pin_code"])
+
+    async def handle_set_enabled(call: ServiceCall) -> dict:
+        entry = await async_set_enabled(hass, call.data["slot"], call.data["enabled"])
+        return {"entry": entry.to_dict()}
 
     async def handle_update_locks(call: ServiceCall) -> dict:
         entry = await async_update_locks(hass, call.data["slot"], call.data["locks"])
@@ -220,6 +233,10 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         schema=SERVICE_UPDATE_PIN_SCHEMA,
     )
     hass.services.async_register(
+        DOMAIN, SERVICE_SET_ENABLED, handle_set_enabled,
+        schema=SERVICE_SET_ENABLED_SCHEMA, supports_response=True,
+    )
+    hass.services.async_register(
         DOMAIN, SERVICE_UPDATE_LOCKS, handle_update_locks,
         schema=SERVICE_UPDATE_LOCKS_SCHEMA, supports_response=True,
     )
@@ -246,6 +263,7 @@ async def async_unload_services(hass: HomeAssistant) -> None:
         SERVICE_UPDATE_START,
         SERVICE_UPDATE_NAME,
         SERVICE_UPDATE_PIN,
+        SERVICE_SET_ENABLED,
         SERVICE_UPDATE_LOCKS,
         SERVICE_LIST_CODES,
         SERVICE_CLEANUP_EXPIRED,

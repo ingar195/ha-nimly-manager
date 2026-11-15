@@ -39,7 +39,7 @@ async def async_register_panel(hass: HomeAssistant) -> None:
             sidebar_icon=PANEL_ICON,
             module_url=f"/{DOMAIN}_panel/nimlykoder-panel.js?v={_PANEL_VERSION}",
             embed_iframe=False,
-            require_admin=False,
+            require_admin=True,
         )
 
         _LOGGER.info("Registered Nimlykoder panel")

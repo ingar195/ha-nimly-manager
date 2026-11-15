@@ -1525,18 +1525,20 @@ class NimlykoderPanel extends LitElement {
 
     getAvatarClass(code) {
         if (this.isExpired(code)) return "avatar-expired";
-        if (code.activated === false) return "avatar-guest";
+        if (code.enabled === false || code.activated === false) return "avatar-guest";
         return code.type === "permanent" ? "avatar-permanent" : "avatar-guest";
     }
 
     getBadgeClass(code) {
         if (this.isExpired(code)) return "badge-expired";
+        if (code.enabled === false) return "badge-expired";
         if (code.activated === false) return "badge-guest";
         return code.type === "permanent" ? "badge-permanent" : "badge-guest";
     }
 
     getBadgeText(code) {
         if (this.isExpired(code)) return this.t("status.expired");
+        if (code.enabled === false) return this.t("status.disabled");
         if (code.activated === false) return this.t("status.pending");
         return code.type === "permanent" ? this.t("type.permanent") : this.t("type.guest");
     }
@@ -1924,6 +1926,21 @@ class NimlykoderPanel extends LitElement {
                         <svg viewBox="0 0 24 24" fill="currentColor">
                             <path d="M20.71,7.04C21.1,6.65 21.1,6 20.71,5.63L18.37,3.29C18,2.9 17.35,2.9 16.96,3.29L15.12,5.12L18.87,8.87M3,17.25V21H6.75L17.81,9.93L14.06,6.18L3,17.25Z"/>
                         </svg>
+                    </button>
+                    <button
+                        class="btn btn-icon btn-secondary"
+                        @click=${() => this._toggleEnabled(code)}
+                        title="${code.enabled === false ? this.t("dialog.enable") : this.t("dialog.disable")}"
+                    >
+                        ${code.enabled === false ? html`
+                            <svg viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M8,5.14V19.14L19,12.14L8,5.14Z"/>
+                            </svg>
+                        ` : html`
+                            <svg viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M6,19H10V5H6V19M14,5V19H18V5H14Z"/>
+                            </svg>
+                        `}
                     </button>
                     <button
                         class="btn btn-icon btn-secondary"
@@ -2609,6 +2626,19 @@ class NimlykoderPanel extends LitElement {
             await this.loadCodes();
         } catch (err) {
             this.error = err.message;
+        }
+    }
+
+    async _toggleEnabled(code) {
+        const enabling = code.enabled === false;
+        try {
+            await this.hass.callWS({ type: "nimlykoder/set_enabled", slot: code.slot, enabled: enabling });
+            await this.loadCodes();
+        } catch (err) {
+            this.error = this.t("errors.set_enabled_failed", {
+                action: enabling ? this.t("dialog.enable").toLowerCase() : this.t("dialog.disable").toLowerCase(),
+                error: err.message,
+            });
         }
     }
 }

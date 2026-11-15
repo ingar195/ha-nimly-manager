@@ -180,6 +180,30 @@ update_pin:
       selector:
         text:
 
+set_enabled:
+  name: Enable/Disable Code
+  description: >-
+    Disable a code without removing it from the list (pulls the PIN off every
+    lock it's on), or re-enable a previously disabled one.
+  fields:
+    slot:
+      name: Slot Number
+      description: Slot number to update
+      required: true
+      example: 10
+      selector:
+        number:
+          min: 0
+          max: 99
+          mode: box
+    enabled:
+      name: Enabled
+      description: True to enable, false to disable
+      required: true
+      example: false
+      selector:
+        boolean:
+
 update_locks:
   name: Update Locks
   description: >-

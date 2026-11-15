@@ -56,6 +56,10 @@ RAW_PING_LOG_MAX = 1000
 # which code was guessed.
 EVENT_WRONG_PIN_ATTEMPT = "nimlykoder_wrong_pin_attempt"
 
+# Event fired when a lock/unlock command this integration issued (currently
+# just the auto-lock timer) raises instead of completing.
+EVENT_LOCK_COMMAND_FAILED = "nimlykoder_lock_command_failed"
+
 # Entry types
 TYPE_PERMANENT = "permanent"
 TYPE_GUEST = "guest"
@@ -68,6 +72,7 @@ SERVICE_UPDATE_EXPIRY = "update_expiry"
 SERVICE_UPDATE_START = "update_start"
 SERVICE_UPDATE_NAME = "update_name"
 SERVICE_UPDATE_PIN = "update_pin"
+SERVICE_SET_ENABLED = "set_enabled"
 SERVICE_LIST_CODES = "list_codes"
 SERVICE_CLEANUP_EXPIRED = "cleanup_expired"
 SERVICE_UPDATE_LOCKS = "update_locks"
@@ -81,6 +86,7 @@ WS_TYPE_UPDATE_EXPIRY = "nimlykoder/update_expiry"
 WS_TYPE_UPDATE_START = "nimlykoder/update_start"
 WS_TYPE_UPDATE_NAME = "nimlykoder/update_name"
 WS_TYPE_UPDATE_PIN = "nimlykoder/update_pin"
+WS_TYPE_SET_ENABLED = "nimlykoder/set_enabled"
 WS_TYPE_SUGGEST_SLOTS = "nimlykoder/suggest_slots"
 WS_TYPE_CONFIG = "nimlykoder/config"
 WS_TYPE_TRANSLATIONS = "nimlykoder/translations"

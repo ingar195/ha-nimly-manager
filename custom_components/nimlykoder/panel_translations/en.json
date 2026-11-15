@@ -78,7 +78,8 @@
     "active": "Active",
     "expired": "Expired",
     "reserved": "Reserved",
-    "pending": "Scheduled"
+    "pending": "Scheduled",
+    "disabled": "Disabled"
   },
 
   "type": {
@@ -121,7 +122,9 @@
     "cancel": "Cancel",
     "save": "Save Changes",
     "add": "Add Person",
-    "remove": "Remove"
+    "remove": "Remove",
+    "disable": "Disable",
+    "enable": "Enable"
   },
 
   "lock_settings": {
@@ -155,7 +158,8 @@
     "lock_required": "Select at least one lock",
     "lock_failed": "Could not lock: {error}",
     "unlock_failed": "Could not unlock: {error}",
-    "auto_lock_save_failed": "Could not save auto-lock settings: {error}"
+    "auto_lock_save_failed": "Could not save auto-lock settings: {error}",
+    "set_enabled_failed": "Could not {action} code: {error}"
   },
 
   "lock_select": {

@@ -51,6 +51,7 @@ class CodeEntry:
     pin: str | None = None
     start: str | None = None
     activated: bool = True
+    enabled: bool = True
     locks: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -78,6 +79,7 @@ class CodeEntry:
             # Entries written before this field existed had no concept of a
             # pending start — treat them as already active.
             activated=data.get("activated", True),
+            enabled=data.get("enabled", True),
             locks=list(data.get("locks", [])),
         )
 
@@ -190,6 +192,7 @@ class NimlykoderStorage:
             "pin": pin,
             "start": start,
             "activated": activated,
+            "enabled": True,
             "locks": list(locks or []),
         }
 
@@ -297,6 +300,18 @@ class NimlykoderStorage:
             self._data[slot_str]["updated"] = datetime.now().isoformat()
             await self.async_save()
 
+    async def update_enabled(self, slot: int, enabled: bool) -> CodeEntry:
+        """Enable/disable an entry without removing it from the list."""
+        slot_str = str(slot)
+        if slot_str not in self._data:
+            raise HomeAssistantError(f"Slot {slot} not found")
+
+        self._data[slot_str]["enabled"] = enabled
+        self._data[slot_str]["updated"] = datetime.now().isoformat()
+        await self.async_save()
+
+        return CodeEntry.from_dict(slot, self._data[slot_str])
+
     async def update_pin(self, slot: int, pin: str) -> CodeEntry:
         """Update the stored PIN for an existing entry."""
         slot_str = str(slot)
@@ -325,7 +340,7 @@ class NimlykoderStorage:
         for slot_str, data in self._data.items():
             if data.get("pin") != pin:
                 continue
-            if not data.get("activated", True):
+            if not data.get("activated", True) or not data.get("enabled", True):
                 continue
             if lock_id is not None and lock_id not in data.get("locks", []):
                 continue

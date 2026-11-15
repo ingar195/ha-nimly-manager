@@ -28,6 +28,7 @@ from .const import (
     WS_TYPE_UPDATE_START,
     WS_TYPE_UPDATE_NAME,
     WS_TYPE_UPDATE_PIN,
+    WS_TYPE_SET_ENABLED,
     WS_TYPE_UPDATE_LOCKS,
     WS_TYPE_SUGGEST_SLOTS,
     WS_TYPE_CONFIG,
@@ -63,6 +64,7 @@ from .users import (
     async_update_locks,
     async_update_pin,
     async_update_start,
+    async_set_enabled,
     suggest_slots,
 )
 from .zha_helpers import get_doorlock_cluster, LOCK_SETTINGS
@@ -109,6 +111,7 @@ def async_register_websocket_handlers(hass: HomeAssistant) -> None:
         handle_update_start,
         handle_update_name,
         handle_update_pin,
+        handle_set_enabled,
         handle_update_locks,
         handle_suggest_slots,
         handle_config,
@@ -129,6 +132,7 @@ def async_register_websocket_handlers(hass: HomeAssistant) -> None:
 
 
 @websocket_api.websocket_command({vol.Required("type"): WS_TYPE_LIST})
+@websocket_api.require_admin
 @websocket_api.async_response
 @_guarded("list_failed")
 async def handle_list(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
@@ -148,6 +152,7 @@ async def handle_list(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
         vol.Optional("locks"): LOCKS_FIELD,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 @_guarded("add_failed")
 async def handle_add(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
@@ -168,6 +173,7 @@ async def handle_add(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
 @websocket_api.websocket_command(
     {vol.Required("type"): WS_TYPE_REMOVE, vol.Required("slot"): int}
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 @_guarded("remove_failed")
 async def handle_remove(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
@@ -182,6 +188,7 @@ async def handle_remove(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
         vol.Optional("expiry"): vol.Any(str, None),
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 @_guarded("update_failed")
 async def handle_update_expiry(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
@@ -196,6 +203,7 @@ async def handle_update_expiry(hass: HomeAssistant, msg: dict[str, Any]) -> dict
         vol.Optional("start"): vol.Any(str, None),
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 @_guarded("update_failed")
 async def handle_update_start(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
@@ -210,6 +218,7 @@ async def handle_update_start(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
         vol.Required("name"): str,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 @_guarded("update_failed")
 async def handle_update_name(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
@@ -228,6 +237,7 @@ async def handle_update_name(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
         vol.Required("pin_code"): str,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 @_guarded("update_failed")
 async def handle_update_pin(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
@@ -237,11 +247,27 @@ async def handle_update_pin(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
 
 @websocket_api.websocket_command(
     {
+        vol.Required("type"): WS_TYPE_SET_ENABLED,
+        vol.Required("slot"): int,
+        vol.Required("enabled"): bool,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+@_guarded("update_failed")
+async def handle_set_enabled(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
+    entry = await async_set_enabled(hass, msg["slot"], msg["enabled"])
+    return {"entry": entry.to_dict()}
+
+
+@websocket_api.websocket_command(
+    {
         vol.Required("type"): WS_TYPE_UPDATE_LOCKS,
         vol.Required("slot"): int,
         vol.Required("locks"): LOCKS_FIELD,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 @_guarded("update_failed")
 async def handle_update_locks(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
@@ -259,6 +285,7 @@ async def handle_update_locks(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
         ),
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 @_guarded("suggest_failed")
 async def handle_suggest_slots(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
@@ -269,6 +296,7 @@ async def handle_suggest_slots(hass: HomeAssistant, msg: dict[str, Any]) -> dict
 @websocket_api.websocket_command(
     {vol.Required("type"): WS_TYPE_RESYNC, vol.Optional("locks"): LOCKS_FIELD}
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 @_guarded("resync_failed")
 async def handle_resync(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
@@ -287,6 +315,7 @@ async def handle_resync(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
 
 
 @websocket_api.websocket_command({vol.Required("type"): WS_TYPE_ENTRIES})
+@websocket_api.require_admin
 @websocket_api.async_response
 @_guarded("entries_failed")
 async def handle_entries(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
@@ -315,6 +344,7 @@ async def handle_entries(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
 @websocket_api.websocket_command(
     {vol.Required("type"): WS_TYPE_CONFIG, vol.Optional("entry_id"): str}
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 @_guarded("config_failed")
 async def handle_config(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
@@ -367,6 +397,7 @@ async def handle_config(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
 
 
 @websocket_api.websocket_command({vol.Required("type"): WS_TYPE_TRANSLATIONS})
+@websocket_api.require_admin
 @websocket_api.async_response
 @_guarded("translations_failed")
 async def handle_translations(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
@@ -404,6 +435,7 @@ async def handle_translations(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
         vol.Optional("entry_id"): str,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 @_guarded("set_auto_lock_failed")
 async def handle_set_auto_lock(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
@@ -433,6 +465,7 @@ async def handle_set_auto_lock(hass: HomeAssistant, msg: dict[str, Any]) -> dict
 @websocket_api.websocket_command(
     {vol.Required("type"): WS_TYPE_ACTIVITY, vol.Optional("entry_id"): str}
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 @_guarded("activity_failed")
 async def handle_activity(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
@@ -459,6 +492,7 @@ def _zha_cluster(hass: HomeAssistant, msg: dict[str, Any]):
 @websocket_api.websocket_command(
     {vol.Required("type"): WS_TYPE_GET_LOCK_SETTINGS, vol.Optional("entry_id"): str}
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 @_guarded("read_failed")
 async def handle_get_lock_settings(hass: HomeAssistant, msg: dict[str, Any]) -> dict:
@@ -493,6 +527,7 @@ async def handle_get_lock_settings(hass: HomeAssistant, msg: dict[str, Any]) -> 
         vol.Optional("entry_id"): str,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 @_guarded("write_failed")
 async def handle_set_lock_setting(hass: HomeAssistant, msg: dict[str, Any]) -> dict:

@@ -21,7 +21,8 @@
     "active": "Aktiv",
     "expired": "Utgången",
     "reserved": "Reserverad",
-    "pending": "Schemalagd"
+    "pending": "Schemalagd",
+    "disabled": "Inaktiverad"
   },
   "type": {
     "permanent": "Permanent",
@@ -62,12 +63,15 @@
     "cancel": "Avbryt",
     "save": "Spara ändringar",
     "add": "Lägg till person",
-    "remove": "Ta bort"
+    "remove": "Ta bort",
+    "disable": "Inaktivera",
+    "enable": "Aktivera"
   },
   "errors": {
     "name_required": "Namn krävs",
     "pin_invalid": "PIN-koden måste vara 4-6 siffror",
-    "lock_required": "Välj minst ett lås"
+    "lock_required": "Välj minst ett lås",
+    "set_enabled_failed": "Kunde inte {action} koden: {error}"
   },
   "lock_select": {
     "title": "Lås som visas nedan"

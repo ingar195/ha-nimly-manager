@@ -172,7 +172,7 @@ async def async_update_pin(hass: HomeAssistant, slot: int, pin_code: str) -> Cod
     """Change a user's PIN on all their locks (pending users: storage only)."""
     entry = _get_user(hass, slot)
     _validate_pin(pin_code)
-    if entry.activated:
+    if entry.activated and entry.enabled:
         results = await async_program_locks(
             hass, slot, pin_code, _reachable(hass, entry.locks)
         )
@@ -180,6 +180,35 @@ async def async_update_pin(hass: HomeAssistant, slot: int, pin_code: str) -> Cod
         if failed:
             raise HomeAssistantError(f"Failed to update PIN on lock: {failed}")
     return await get_users(hass).update_pin(slot, pin_code)
+
+
+async def async_set_enabled(hass: HomeAssistant, slot: int, enabled: bool) -> CodeEntry:
+    """Disable/re-enable a user without removing them from the list.
+
+    Disabling pulls the PIN off every lock the same way a future-dated start
+    does (see async_update_start); re-enabling pushes it back.
+    """
+    entry = _get_user(hass, slot)
+    if enabled == entry.enabled:
+        return entry
+
+    if entry.activated:
+        reachable = _reachable(hass, entry.locks)
+        if enabled:
+            if not entry.pin:
+                raise HomeAssistantError("No stored PIN to program on the lock(s)")
+            results = await async_program_locks(hass, slot, entry.pin, reachable)
+        else:
+            results = await async_clear_locks(hass, slot, reachable)
+        failed = failed_locks(hass, results)
+        if failed:
+            raise HomeAssistantError(
+                f"Failed to {'enable' if enabled else 'disable'} on lock: {failed}"
+            )
+
+    updated = await get_users(hass).update_enabled(slot, enabled)
+    _LOGGER.info("Slot %s %s", slot, "enabled" if enabled else "disabled")
+    return updated
 
 
 async def async_update_expiry(
@@ -239,7 +268,7 @@ async def async_update_locks(
 
     removed = _reachable(hass, [l for l in entry.locks if l not in new_ids])
 
-    if added and entry.activated:
+    if added and entry.activated and entry.enabled:
         if not entry.pin:
             raise HomeAssistantError("No stored PIN to program on the new lock(s)")
         results = await async_program_locks(hass, slot, entry.pin, added)
@@ -306,7 +335,12 @@ async def async_resync(
         adapter = get_entry_data(hass, lock_id)["mqtt_adapter"]
         result = summary[lock_id]
         for user in all_users:
-            want = lock_id in user.locks and user.activated and not is_expired(user)
+            want = (
+                lock_id in user.locks
+                and user.activated
+                and user.enabled
+                and not is_expired(user)
+            )
             try:
                 if want:
                     if not user.pin:
